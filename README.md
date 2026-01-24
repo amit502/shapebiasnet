@@ -9,8 +9,16 @@ This repository contains code for training and evaluating dual-stream CNNs that 
 1. **Place datasets** in `./data`:
    - CIFAR-10, CIFAR-10-C
    - CIFAR-100, CIFAR-100-C
+2. **Install dependencies** :
+   - create env
+   - Install dependencies
 
-2. **Train models**:
+   ```bash
+       pip install -r requirements.txt
+
+   ```
+
+3. **Train models**:
 
 ```bash
 # Train all models on CIFAR-10 for 40 epochs and run all configs
@@ -25,15 +33,21 @@ python train.py --dataset cifar10 --epochs 80 --model shape_res50
 
 # Evaluate all models on CIFAR-10
 
+```bash
 python eval.py --dataset cifar10 --eval_all
+```
 
 # Evaluate specific models using checkpoints
 
+```bash
+
 python eval.py --dataset cifar10 --model baseline_res50 --ckpt checkpoints/baseline_res50_cifar10.pt
 python eval.py --dataset cifar10 --model shape_res50 --ckpt checkpoints/shape_res50_cifar10.pt
+```
 
-./data # CIFAR-10, CIFAR-10-C, CIFAR-100, CIFAR-100-C datasets
-./checkpoints # Saved model checkpoints
-train.py # Training script
-eval.py # Evaluation script
-README.md # This file
+./data # CIFAR-10, CIFAR-10-C, CIFAR-100, CIFAR-100-C datasets.
+./checkpoints # Saved model checkpoints.
+train.py # Training script.
+eval.py # Evaluation script.
+requirements.txt # Requirements.
+README.md # This file.

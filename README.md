@@ -1,4 +1,4 @@
-# ShapeBiasNet
+# Shape-ResNet
 
 This repository contains code for training and evaluating dual-stream CNNs that integrate a **shape-biased pathway** into standard ResNet architectures. The models are designed to improve robustness under common corruptions (CIFAR-10-C and CIFAR-100-C) while maintaining competitive clean accuracy.
 

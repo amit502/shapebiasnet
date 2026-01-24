@@ -45,9 +45,9 @@ python eval.py --dataset cifar10 --model baseline_res50 --ckpt checkpoints/basel
 python eval.py --dataset cifar10 --model shape_res50 --ckpt checkpoints/shape_res50_cifar10.pt
 ```
 
-./data # CIFAR-10, CIFAR-10-C, CIFAR-100, CIFAR-100-C datasets.
-./checkpoints # Saved model checkpoints.
-train.py # Training script.
-eval.py # Evaluation script.
-requirements.txt # Requirements.
+./data # CIFAR-10, CIFAR-10-C, CIFAR-100, CIFAR-100-C datasets.\
+./checkpoints # Saved model checkpoints.\
+train.py # Training script.\
+eval.py # Evaluation script.\
+requirements.txt # Requirements.\
 README.md # This file.

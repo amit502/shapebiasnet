@@ -173,14 +173,14 @@ class ShapeBiasNet(nn.Module):
 
         # 🔹 set gate channels correctly based on RGB backbone
         if rgb_type=="custom" or rgb_type=="18":
-            self.g1 = ShapeGate(64, 64)
-            self.g2 = ShapeGate(128, 128)
-            self.g3 = ShapeGate(256, 256)
+            # self.g1 = ShapeGate(64, 64)
+            # self.g2 = ShapeGate(128, 128)
+            # self.g3 = ShapeGate(256, 256)
             fusion_in_ch = 512
         elif rgb_type=="50":
-            self.g1 = ShapeGate(256, 64)
-            self.g2 = ShapeGate(512, 128)
-            self.g3 = ShapeGate(1024, 256)
+            # self.g1 = ShapeGate(256, 64)
+            # self.g2 = ShapeGate(512, 128)
+            # self.g3 = ShapeGate(1024, 256)
             fusion_in_ch = 1024 + 256
 
         self.fusion = nn.Sequential(
@@ -196,9 +196,9 @@ class ShapeBiasNet(nn.Module):
         s1,s2,s3 = self.shape(x)
         r1,r2,r3 = self.rgb(x)
 
-        r1 = self.g1(r1, F.interpolate(s1, r1.shape[2:]), self.alpha)
-        r2 = self.g2(r2, F.interpolate(s2, r2.shape[2:]), self.alpha)
-        r3 = self.g3(r3, F.interpolate(s3, r3.shape[2:]), self.alpha)
+        # r1 = self.g1(r1, F.interpolate(s1, r1.shape[2:]), self.alpha)
+        # r2 = self.g2(r2, F.interpolate(s2, r2.shape[2:]), self.alpha)
+        # r3 = self.g3(r3, F.interpolate(s3, r3.shape[2:]), self.alpha)
 
         f = self.fusion(torch.cat([r3, F.interpolate(s3, r3.shape[2:])],1))
         return self.head(f)

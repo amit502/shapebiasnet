@@ -46,6 +46,10 @@ def test(model):
 
 # ---------------- loop ------------------
 for name in runs:
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    np.random.seed(SEED) 
+    random.seed(SEED)
     print("\n==============================")
     print("Training:", name)
     print("==============================")

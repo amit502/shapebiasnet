@@ -24,10 +24,10 @@ This repository contains code for training and evaluating dual-stream CNNs that 
 # Train all models on CIFAR-10 for 40 epochs and run all configs
 python train.py --dataset cifar10 --epochs 40 --run_all
 
-# Train Baseline ResNet-50 on CIFAR-10 for 80 epochs
+# You may train a particular model like Baseline ResNet-50 on CIFAR-10 for 80 epochs
 python train.py --dataset cifar10 --epochs 80 --model baseline_res50
 
-# Train Shape-ResNet50 on CIFAR-10 for 80 epochs
+# You may train a particular model like Shape-ResNet50 on CIFAR-10 for 80 epochs
 python train.py --dataset cifar10 --epochs 80 --model shape_res50
 ```
 
@@ -44,6 +44,8 @@ python eval.py --dataset cifar10 --eval_all
 python eval.py --dataset cifar10 --model baseline_res50 --ckpt checkpoints/baseline_res50_cifar10.pt
 python eval.py --dataset cifar10 --model shape_res50 --ckpt checkpoints/shape_res50_cifar10.pt
 ```
+
+all models = ["baseline_res18","baseline_res50","shape_custom","shape_res18","shape_res50"]
 
 ./data # CIFAR-10, CIFAR-10-C, CIFAR-100, CIFAR-100-C datasets.\
 ./checkpoints # Saved model checkpoints.\

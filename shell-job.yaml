@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cleanup-train
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: shell
+          image: ubuntu:22.04
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Deleting /pvc/imagenet/train..."
+              rm -rf /pvc/imagenet/train
+              echo "Creating empty /pvc/imagenet/train..."
+              mkdir -p /pvc/imagenet/train /pvc/imagenet/val
+              echo "Done."
+              ls -lh /pvc/imagenet/
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc

@@ -1,0 +1,101 @@
+# downloader-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Downloads ImageNet via HuggingFace and ImageNet-C via Zenodo.
+# Python scripts are base64-encoded to keep YAML valid.
+#
+# Nautilus resource policy:
+#   CPU  request=10, limit=12  -> ratio 1.2 exactly
+#   RAM  request=10Gi, limit=12Gi -> ratio 1.2 exactly
+#   No GPU needed
+#   backoffLimit=4 for retry on preemption
+#
+# Submit:  kubectl apply -f k8s/downloader-job.yaml
+# Logs:    kubectl logs -f job/imagenet-downloader -n kc-ai-research-lab
+# Status:  kubectl get job imagenet-downloader -n kc-ai-research-lab
+# Delete:  kubectl delete job imagenet-downloader -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: imagenet-downloader
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: downloader
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+          command: ["/bin/bash", "-c"]
+          args:
+            - >-
+              set -e &&
+              echo "== ImageNet Download Job ==" &&
+              echo "$(date)" &&
+
+              apt-get update -qq &&
+              apt-get install -y -qq aria2 tar wget &&
+              pip install -q huggingface_hub datasets Pillow &&
+
+              DATA_DIR=/pvc/imagenet &&
+              mkdir -p $DATA_DIR &&
+
+              echo "== Step 1: Downloading ImageNet via HuggingFace ==" &&
+              echo aW1wb3J0IG9zCmZyb20gaHVnZ2luZ2ZhY2VfaHViIGltcG9ydCBzbmFwc2hvdF9kb3dubG9hZApwcmludCgiRG93bmxvYWRpbmcgSW1hZ2VOZXQgc2hhcmRzLi4uIikKc25hcHNob3RfZG93bmxvYWQoCiAgICByZXBvX2lkPSJJTFNWUkMvaW1hZ2VuZXQtMWsiLAogICAgcmVwb190eXBlPSJkYXRhc2V0IiwKICAgIGxvY2FsX2Rpcj0iL3B2Yy9pbWFnZW5ldC9oZl9jYWNoZSIsCiAgICB0b2tlbj1vcy5lbnZpcm9uWyJIVUdHSU5HX0ZBQ0VfSFVCX1RPS0VOIl0sCiAgICBpZ25vcmVfcGF0dGVybnM9WyIqLm1kIiwgIiouZ2l0YXR0cmlidXRlcyJdLAopCnByaW50KCJEb3dubG9hZCBjb21wbGV0ZS4iKQo= | base64 -d > /tmp/download_hf.py &&
+              python3 /tmp/download_hf.py &&
+
+              echo "== Converting to ImageFolder layout ==" &&
+              echo aW1wb3J0IG9zCmZyb20gZGF0YXNldHMgaW1wb3J0IGxvYWRfZGF0YXNldAp0b2tlbiA9IG9zLmVudmlyb25bIkhVR0dJTkdfRkFDRV9IVUJfVE9LRU4iXQpkYXRhX2RpciA9ICIvcHZjL2ltYWdlbmV0IgpoZl9jYWNoZSA9IGRhdGFfZGlyICsgIi9oZl9jYWNoZSIKcHJpbnQoIkxvYWRpbmcgZGF0YXNldC4uLiIpCmRzID0gbG9hZF9kYXRhc2V0KCJJTFNWUkMvaW1hZ2VuZXQtMWsiLCBjYWNoZV9kaXI9aGZfY2FjaGUsIHRva2VuPXRva2VuKQpwcmludCgiU2F2aW5nIHRyYWluIHNwbGl0Li4uIikKdHJhaW5fZGlyID0gZGF0YV9kaXIgKyAiL3RyYWluIgpvcy5tYWtlZGlycyh0cmFpbl9kaXIsIGV4aXN0X29rPVRydWUpCmZvciBpLCBzYW1wbGUgaW4gZW51bWVyYXRlKGRzWyJ0cmFpbiJdKToKICAgIGNsYXNzX2RpciA9IHRyYWluX2RpciArICIvIiArIHN0cihzYW1wbGVbImxhYmVsIl0pLnpmaWxsKDQpCiAgICBvcy5tYWtlZGlycyhjbGFzc19kaXIsIGV4aXN0X29rPVRydWUpCiAgICBpbWdfcGF0aCA9IGNsYXNzX2RpciArICIvIiArIHN0cihpKS56ZmlsbCg4KSArICIuSlBFRyIKICAgIGlmIG5vdCBvcy5wYXRoLmV4aXN0cyhpbWdfcGF0aCk6CiAgICAgICAgc2FtcGxlWyJpbWFnZSJdLnNhdmUoaW1nX3BhdGgpCiAgICBpZiBpICUgNTAwMDAgPT0gMDoKICAgICAgICBwcmludCgiVHJhaW46ICIgKyBzdHIoaSkgKyAiLzEyODExNjciKQpwcmludCgiU2F2aW5nIHZhbCBzcGxpdC4uLiIpCnZhbF9kaXIgPSBkYXRhX2RpciArICIvdmFsIgpvcy5tYWtlZGlycyh2YWxfZGlyLCBleGlzdF9vaz1UcnVlKQpmb3IgaSwgc2FtcGxlIGluIGVudW1lcmF0ZShkc1sidmFsaWRhdGlvbiJdKToKICAgIGNsYXNzX2RpciA9IHZhbF9kaXIgKyAiLyIgKyBzdHIoc2FtcGxlWyJsYWJlbCJdKS56ZmlsbCg0KQogICAgb3MubWFrZWRpcnMoY2xhc3NfZGlyLCBleGlzdF9vaz1UcnVlKQogICAgaW1nX3BhdGggPSBjbGFzc19kaXIgKyAiLyIgKyBzdHIoaSkuemZpbGwoOCkgKyAiLkpQRUciCiAgICBpZiBub3Qgb3MucGF0aC5leGlzdHMoaW1nX3BhdGgpOgogICAgICAgIHNhbXBsZVsiaW1hZ2UiXS5zYXZlKGltZ19wYXRoKQogICAgaWYgaSAlIDEwMDAwID09IDA6CiAgICAgICAgcHJpbnQoIlZhbDogIiArIHN0cihpKSArICIvNTAwMDAiKQpwcmludCgiQ29udmVyc2lvbiBjb21wbGV0ZS4iKQo= | base64 -d > /tmp/convert_hf.py &&
+              python3 /tmp/convert_hf.py &&
+
+              TRAIN_CLASSES=$(ls $DATA_DIR/train | wc -l) &&
+              VAL_CLASSES=$(ls $DATA_DIR/val | wc -l) &&
+              echo "Train classes $TRAIN_CLASSES (expect 1000)" &&
+              echo "Val classes $VAL_CLASSES (expect 1000)" &&
+              if [ "$TRAIN_CLASSES" -ne 1000 ] || [ "$VAL_CLASSES" -ne 1000 ]; then echo "ImageNet verification failed" && exit 1; fi &&
+              echo "ImageNet ready" &&
+              rm -rf $DATA_DIR/hf_cache &&
+
+              echo "== Step 2: Downloading ImageNet-C via Zenodo ==" &&
+              IMAGENET_C_DIR=$DATA_DIR/ImageNet-C &&
+              mkdir -p $IMAGENET_C_DIR &&
+
+              aria2c --max-connection-per-server=16 --split=16 --min-split-size=100M --continue=true --allow-piece-length-change=true --max-tries=10 --retry-wait=5 --dir=$IMAGENET_C_DIR --out=noise.tar   https://zenodo.org/record/2235448/files/noise.tar &&
+              aria2c --max-connection-per-server=16 --split=16 --min-split-size=100M --continue=true --allow-piece-length-change=true --max-tries=10 --retry-wait=5 --dir=$IMAGENET_C_DIR --out=blur.tar    https://zenodo.org/record/3565959/files/blur.tar &&
+              aria2c --max-connection-per-server=16 --split=16 --min-split-size=100M --continue=true --allow-piece-length-change=true --max-tries=10 --retry-wait=5 --dir=$IMAGENET_C_DIR --out=weather.tar https://zenodo.org/record/2235448/files/weather.tar &&
+              aria2c --max-connection-per-server=16 --split=16 --min-split-size=100M --continue=true --allow-piece-length-change=true --max-tries=10 --retry-wait=5 --dir=$IMAGENET_C_DIR --out=digital.tar https://zenodo.org/record/2235448/files/digital.tar &&
+              aria2c --max-connection-per-server=16 --split=16 --min-split-size=100M --continue=true --allow-piece-length-change=true --max-tries=10 --retry-wait=5 --dir=$IMAGENET_C_DIR --out=extra.tar   https://zenodo.org/record/2235448/files/extra.tar &&
+
+              echo "Extracting ImageNet-C..." &&
+              cd $IMAGENET_C_DIR &&
+              for TAR in *.tar; do tar -xf $TAR --strip-components=1 -C $IMAGENET_C_DIR && rm $TAR; done &&
+
+              echo "== All done ==" &&
+              echo "$(date)" &&
+              df -h /pvc &&
+              ls -lh /pvc/imagenet/
+
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: token
+
+          resources:
+            requests:
+              cpu: "10"
+              memory: "10Gi"
+            limits:
+              cpu: "12"
+              memory: "12Gi"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc

@@ -1,0 +1,138 @@
+# corrupt-eval-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Runs corruption evaluation only on already-trained checkpoints.
+# Submit this after ImageNet-C is fully extracted.
+#
+# Prerequisites:
+#   - Checkpoints must exist in /pvc/checkpoints/
+#   - ImageNet-C must be fully extracted in /pvc/imagenet/ImageNet-C/
+#
+# EXPERIMENT GROUPS — edit --eval_group to match what was trained:
+#   imagenet_core     : baseline_res50 + shape_res50
+#   imagenet_deep     : baseline_res101 + shape_res101
+#   imagenet_convnext : baseline_convnext_tiny + shape_convnext_tiny
+#   imagenet_effnet   : baseline_efficientnet_b4 + shape_effnet_b4
+#   imagenet_all      : all rounds combined
+#
+# Nautilus resource policy:
+#   CPU  request=10, limit=12  → ratio 1.2 exactly  ✓
+#   RAM  request=30Gi, limit=36Gi → ratio 1.2 exactly  ✓
+#   GPU  request=2, limit=2    → limits == requests  ✓
+#   backoffLimit=0 — fail fast, investigate manually  ✓
+#
+# Submit:  kubectl apply -f k8s/corrupt-eval-job.yaml
+# Logs:    kubectl logs -f job/shape-resnet-corrupt-eval -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-resnet-corrupt-eval -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-resnet-corrupt-eval
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: corrupt-eval
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              # ── Clone repo ────────────────────────────────────
+              echo "=========================================="
+              echo "  Cloning repo (branch: review)"
+              echo "=========================================="
+              git clone \
+                --branch review \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              # ── Dependencies ──────────────────────────────────
+              pip install -r requirements.txt --quiet
+
+              mkdir -p /pvc/results
+
+              # ── Verify ImageNet-C is ready ────────────────────
+              echo "=========================================="
+              echo "  Verifying ImageNet-C"
+              echo "=========================================="
+              MISSING=0
+              for CORR in gaussian_noise shot_noise impulse_noise \
+                          defocus_blur glass_blur motion_blur zoom_blur \
+                          snow frost fog brightness \
+                          contrast elastic_transform pixelate jpeg_compression
+              do
+                if [ -d "/pvc/imagenet/ImageNet-C/$CORR" ]; then
+                  echo "  ✓ $CORR"
+                else
+                  echo "  ✗ MISSING: $CORR"
+                  MISSING=$((MISSING + 1))
+                fi
+              done
+              if [ "$MISSING" -ne 0 ]; then
+                echo "  $MISSING corruptions missing — ImageNet-C not ready. Aborting."
+                exit 1
+              fi
+              echo "  ImageNet-C ready."
+
+              # ── Corruption Evaluation ─────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Corruption Evaluation (ImageNet-C)"
+              echo "=========================================="
+              python eval.py \
+                --eval_group  imagenet_core \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --results_dir /pvc/results \
+                --batch       256 \
+                --workers     8 \
+                --corrupt_only
+
+              # ── Done ──────────────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Corrupt eval complete. Results:"
+              echo "=========================================="
+              ls -lh /pvc/results/
+
+          resources:
+            requests:
+              cpu: "10"
+              memory: "30Gi"
+              nvidia.com/a100: "2"
+            limits:
+              cpu: "12" # 12/10 = 1.2 exactly ✓
+              memory: "36Gi" # 36/30 = 1.2 exactly ✓
+              nvidia.com/a100: "2" # limits == requests ✓
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: NCCL_DEBUG
+              value: "WARN"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+
+      tolerations:
+        - key: "nvidia.com/a100"
+          operator: "Exists"
+          effect: "NoSchedule"

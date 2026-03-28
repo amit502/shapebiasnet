@@ -1,0 +1,34 @@
+# shell-pod.yaml
+# Interactive pod for inspecting / cleaning the PVC.
+# Auto-deletes when you exit (restartPolicy: Never + kubectl delete).
+#
+# Usage:
+#   kubectl apply -f k8s/shell-pod.yaml
+#   kubectl exec -it shell-pod -n kc-ai-research-lab -- bash
+#   kubectl delete pod shell-pod -n kc-ai-research-lab  (when done)
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shell-pod
+  namespace: kc-ai-research-lab
+spec:
+  restartPolicy: Never
+  containers:
+    - name: shell
+      image: ubuntu:22.04
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: "1"
+          memory: "1Gi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      volumeMounts:
+        - name: data
+          mountPath: /pvc
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: shape-resnet-pvc

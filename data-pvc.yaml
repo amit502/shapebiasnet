@@ -1,0 +1,38 @@
+# data-pvc.yaml
+# ─────────────────────────────────────────────────────────────
+# Single PVC for everything: ImageNet data, checkpoints, results.
+# No need for two PVCs — subdirectories handle the separation cleanly.
+#
+# Directory layout on the PVC:
+#   /pvc/
+#   ├── imagenet/
+#   │   ├── train/          (1,281,167 images)
+#   │   ├── val/            (50,000 images)
+#   │   └── ImageNet-C/     (15 corruptions × 5 severities)
+#   ├── checkpoints/        (model .pt files, auto-resumed on preemption)
+#   └── results/            (eval JSON + txt, profiler JSON + txt)
+#
+# Storage breakdown:
+#   ImageNet train (extracted) : ~145 GB
+#   ImageNet val   (extracted) :   ~7 GB
+#   ImageNet-C                 :  ~80 GB
+#   Checkpoints (all models)   :   ~2 GB
+#   Results / reports          :  ~0.5 GB
+#   Buffer                     :  ~15 GB
+#   Total                      : ~250 GB  →  300Gi
+#
+# Apply:  kubectl apply -f k8s/data-pvc.yaml -n kc-ai-research-lab
+# Check:  kubectl get pvc shape-resnet-pvc -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shape-resnet-pvc
+  namespace: kc-ai-research-lab
+spec:
+  accessModes:
+    - ReadWriteMany # cephfs supports multi-pod mount
+  storageClassName: rook-cephfs-central
+  resources:
+    requests:
+      storage: 300Gi

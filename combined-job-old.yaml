@@ -1,0 +1,170 @@
+# combined-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Full pipeline: clone → train → clean eval → corrupt eval → profile
+#
+# Prerequisites (run once before submitting):
+#   kubectl create secret generic github-pat \
+#     --from-literal=token=<your-github-PAT> \
+#     -n kc-ai-research-lab
+#
+# Nautilus resource policy compliance:
+#   CPU  request=20, limit=24  → ratio 1.2  ✓
+#   RAM  request=60Gi, limit=72Gi → ratio 1.2  ✓
+#   GPU  request=4, limit=4    → limits == requests  ✓
+#   CPU values are integers  ✓
+#   backoffLimit=4 for preemption tolerance  ✓
+#
+# Submit:  kubectl apply -f k8s/combined-job.yaml
+# Logs:    kubectl logs -f job/shape-resnet-pipeline -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-resnet-pipeline -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-resnet-pipeline
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 4
+
+  template:
+    spec:
+      restartPolicy: OnFailure
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              # ── Step 0: Clone repo ────────────────────────────
+              echo "=========================================="
+              echo "  Step 0: Cloning repo"
+              echo "=========================================="
+              # PAT is mounted from the github-pat secret
+              git clone \
+                --branch review \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+
+              cd /shapebiasnet
+
+              # ── Step 1: Dependencies ──────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 1: Installing dependencies"
+              echo "=========================================="
+              pip install -r requirements.txt --quiet
+
+              # ── Create output dirs on PVC ─────────────────────
+              mkdir -p /pvc/checkpoints /pvc/results
+
+              # ── Step 2: Train ─────────────────────────────────
+              # Auto-resumes if checkpoint already exists on PVC.
+              # Safe to re-run after preemption.
+              echo ""
+              echo "=========================================="
+              echo "  Step 2: Training (clean data only)"
+              echo "=========================================="
+              python train.py \
+                --model       shape_res18 \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --epochs      90 \
+                --batch       256 \
+                --workers     8
+
+              # ── Step 3: Clean Evaluation ──────────────────────
+              # Evaluates on ImageNet val set (clean, no corruptions).
+              # Results saved to /pvc/results/
+              echo ""
+              echo "=========================================="
+              echo "  Step 3: Clean Evaluation (ImageNet val)"
+              echo "=========================================="
+              python eval.py \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --results_dir /pvc/results \
+                --batch       256 \
+                --workers     8 \
+                --eval_all \
+                --clean_only
+
+              # ── Step 4: Corruption Evaluation ─────────────────
+              # Evaluates on ImageNet-C (15 corruptions × 5 severities).
+              # Results saved to /pvc/results/
+              echo ""
+              echo "=========================================="
+              echo "  Step 4: Corruption Evaluation (ImageNet-C)"
+              echo "=========================================="
+              python eval.py \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --results_dir /pvc/results \
+                --batch       256 \
+                --workers     8 \
+                --eval_all \
+                --corrupt_only
+
+              # ── Step 5: Efficiency Profiling ──────────────────
+              # FLOPs, latency, peak memory, param counts.
+              # Saves timestamped JSON + txt to /pvc/results/
+              echo ""
+              echo "=========================================="
+              echo "  Step 5: Efficiency Profiling"
+              echo "=========================================="
+              python profiler.py \
+                --dataset     imagenet \
+                --results_dir /pvc/results \
+                --warmup      20 \
+                --runs        100
+
+              # ── Done ──────────────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Pipeline complete. Results:"
+              echo "=========================================="
+              ls -lh /pvc/results/
+              ls -lh /pvc/checkpoints/
+
+          resources:
+            requests:
+              cpu: "20"
+              memory: "60Gi"
+              nvidia.com/gpu: "4"
+            limits:
+              cpu: "24" # 20/16 = 1.2 ✓
+              memory: "72Gi" # 80/64 = 1.2 ✓
+              nvidia.com/gpu: "4" # limits == requests ✓
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat # kubectl create secret generic github-pat
+                  key: token #   --from-literal=token=<your-PAT>
+
+            - name: NCCL_DEBUG
+              value: "WARN"
+            - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

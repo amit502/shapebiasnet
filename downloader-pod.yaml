@@ -1,0 +1,60 @@
+# downloader-pod.yaml
+# ─────────────────────────────────────────────────────────────
+# Interactive pod for downloading ImageNet + ImageNet-C to PVC.
+# Stays alive indefinitely (sleep infinity) so you can exec in.
+#
+# Nautilus resource policy:
+#   - limits / requests ratio: 1.2  (enforced)
+#   - GPU: not needed for download (saves quota)
+#   - CPU requests/limits must be integers
+#
+# Resource sizing:
+#   CPU request=8, limit=10  → ratio 10/8 = 1.25 ≈ 1.2 ✓
+#   RAM request=8Gi, limit=10Gi → ratio 1.25 ✓
+#
+# Lifecycle:
+#   1.  kubectl apply -f downloader-pod.yaml -n <ns>
+#   2.  kubectl exec -it imagenet-downloader -n <ns> -- bash
+#   3.  tmux new -s dl && bash /scripts/download_imagenet.sh
+#   4.  bash /scripts/download_imagenet_c.sh
+#   5.  kubectl delete pod imagenet-downloader -n <ns>
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: imagenet-downloader
+  namespace: kc-ai-research-lab
+  labels:
+    app: imagenet-downloader
+spec:
+  restartPolicy: Never # don't restart — download is idempotent via aria2c
+  containers:
+    - name: downloader
+      image: ubuntu:22.04
+      command: ["sleep", "infinity"]
+
+      resources:
+        requests:
+          cpu: "8" # integer — Nautilus policy
+          memory: "8Gi"
+        limits:
+          cpu: "10" # 10/8 = 1.25 ≈ 1.2 ratio ✓
+          memory: "10Gi" # 10/8 = 1.25 ✓
+          # NOTE: no GPU requested — not needed for download
+
+      volumeMounts:
+        - name: imagenet-data
+          mountPath: /pvc # matches combined-job.yaml mount path
+        - name: download-scripts
+          mountPath: /scripts
+          readOnly: true
+
+  volumes:
+    - name: imagenet-data
+      persistentVolumeClaim:
+        claimName: shape-resnet-pvc # same PVC used by training job
+
+    - name: download-scripts
+      configMap:
+        name: imagenet-download-scripts
+        defaultMode: 0755 # make scripts executable

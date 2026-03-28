@@ -1,0 +1,598 @@
+# downloader-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Downloads ImageNet + ImageNet-C using image-net.org credentials.
+# Single tar files, fully resumable via aria2c --continue=true.
+# No parquet conversion, no lazy downloads, no HuggingFace.
+#
+# Prerequisites:
+#   kubectl create secret generic imagenet-secret \
+#     --from-literal=username=<your-imagenet.org-username> \
+#     --from-literal=password=<your-imagenet.org-password> \
+#     -n kc-ai-research-lab
+#
+# Nautilus resource policy:
+#   CPU  request=10, limit=12  → ratio 1.2 exactly  ✓
+#   RAM  request=20Gi, limit=24Gi → ratio 1.2 exactly  ✓
+#   No GPU needed  ✓
+#   backoffLimit=4 — aria2c resumes on retry  ✓
+#
+# Submit:  kubectl apply -f k8s/downloader-job.yaml
+# Logs:    kubectl logs -f job/imagenet-downloader -n kc-ai-research-lab
+# Status:  kubectl get job imagenet-downloader -n kc-ai-research-lab
+# Delete:  kubectl delete job imagenet-downloader -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: imagenet-downloader
+#   namespace: kc-ai-research-lab
+# spec:
+#   backoffLimit: 4
+#   template:
+#     spec:
+#       restartPolicy: OnFailure
+#       containers:
+#         - name: downloader
+#           image: ubuntu:22.04
+#           command: ["/bin/bash", "-c"]
+#           args:
+#             - |
+#               set -e
+
+#               echo "=========================================="
+#               echo "  ImageNet Download (image-net.org)"
+#               echo "  $(date)"
+#               echo "=========================================="
+
+#               apt-get update -qq
+#               apt-get install -y -qq aria2 tar wget
+
+#               DATA_DIR="/pvc/imagenet"
+#               mkdir -p "$DATA_DIR/train" "$DATA_DIR/val"
+
+#               # ══════════════════════════════════════════
+#               #  STEP 1: Download ImageNet tars
+#               # ══════════════════════════════════════════
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 1: Downloading ImageNet (~145GB)"
+#               echo "=========================================="
+
+#               echo "[1/4] Downloading train split..."
+#               aria2c \
+#                 --http-user="$IMAGENET_USER" \
+#                 --http-passwd="$IMAGENET_PASS" \
+#                 --max-connection-per-server=16 \
+#                 --split=16 \
+#                 --min-split-size=100M \
+#                 --continue=true \
+#                 --max-tries=0 \
+#                 --retry-wait=10 \
+#                 --dir="$DATA_DIR" \
+#                 --out="ILSVRC2012_img_train.tar" \
+#                 "https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_train.tar"
+
+#               echo "[2/4] Downloading val split..."
+#               aria2c \
+#                 --http-user="$IMAGENET_USER" \
+#                 --http-passwd="$IMAGENET_PASS" \
+#                 --max-connection-per-server=16 \
+#                 --split=16 \
+#                 --min-split-size=100M \
+#                 --continue=true \
+#                 --max-tries=0 \
+#                 --retry-wait=10 \
+#                 --dir="$DATA_DIR" \
+#                 --out="ILSVRC2012_img_val.tar" \
+#                 "https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_val.tar"
+
+#               # ══════════════════════════════════════════
+#               #  STEP 2: Extract
+#               # ══════════════════════════════════════════
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 2: Extracting"
+#               echo "=========================================="
+
+#               echo "[3/4] Extracting train split..."
+#               tar -xf "$DATA_DIR/ILSVRC2012_img_train.tar" -C "$DATA_DIR/train"
+#               find "$DATA_DIR/train" -name "*.tar" | while read CLASS_TAR; do
+#                 CLASS=$(basename "$CLASS_TAR" .tar)
+#                 mkdir -p "$DATA_DIR/train/$CLASS"
+#                 tar -xf "$CLASS_TAR" -C "$DATA_DIR/train/$CLASS"
+#                 rm "$CLASS_TAR"
+#               done
+#               echo "  Train extraction done."
+
+#               echo "[4/4] Extracting and organising val split..."
+#               tar -xf "$DATA_DIR/ILSVRC2012_img_val.tar" -C "$DATA_DIR/val"
+#               wget -qO /tmp/valprep.sh \
+#                 https://raw.githubusercontent.com/soumith/imagenetloader.torch/master/valprep.sh
+#               cd "$DATA_DIR/val" && bash /tmp/valprep.sh
+#               echo "  Val extraction done."
+
+#               # Verify
+#               TRAIN_CLASSES=$(ls "$DATA_DIR/train" | wc -l)
+#               VAL_CLASSES=$(ls "$DATA_DIR/val" | wc -l)
+#               echo "  Train classes : $TRAIN_CLASSES (expect 1000)"
+#               echo "  Val   classes : $VAL_CLASSES   (expect 1000)"
+#               if [ "$TRAIN_CLASSES" -ne 1000 ] || [ "$VAL_CLASSES" -ne 1000 ]; then
+#                 echo "  ✗ ImageNet verification failed"
+#                 exit 1
+#               fi
+#               echo "  ✓ ImageNet ready"
+
+#               # Cleanup tars
+#               rm -f "$DATA_DIR/ILSVRC2012_img_train.tar"
+#               rm -f "$DATA_DIR/ILSVRC2012_img_val.tar"
+
+#               # ══════════════════════════════════════════
+#               #  STEP 3: ImageNet-C via Zenodo
+#               # ══════════════════════════════════════════
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 3: Downloading ImageNet-C (~80GB)"
+#               echo "=========================================="
+
+#               IMAGENET_C_DIR="$DATA_DIR/ImageNet-C"
+#               mkdir -p "$IMAGENET_C_DIR"
+
+#               for NAME_URL in \
+#                 "noise.tar|https://zenodo.org/record/2235448/files/noise.tar" \
+#                 "blur.tar|https://zenodo.org/record/3565959/files/blur.tar" \
+#                 "weather.tar|https://zenodo.org/record/2235448/files/weather.tar" \
+#                 "digital.tar|https://zenodo.org/record/2235448/files/digital.tar" \
+#                 "extra.tar|https://zenodo.org/record/2235448/files/extra.tar"
+#               do
+#                 NAME=$(echo "$NAME_URL" | cut -d'|' -f1)
+#                 URL=$(echo "$NAME_URL" | cut -d'|' -f2)
+#                 if [ -f "$IMAGENET_C_DIR/$NAME" ]; then
+#                   echo "  [SKIP] $NAME already exists"
+#                   continue
+#                 fi
+#                 echo "  Downloading $NAME..."
+#                 aria2c \
+#                   --max-connection-per-server=16 \
+#                   --split=16 \
+#                   --min-split-size=100M \
+#                   --continue=true \
+#                   --max-tries=0 \
+#                   --retry-wait=10 \
+#                   --dir="$IMAGENET_C_DIR" \
+#                   --out="$NAME" \
+#                   "$URL"
+#               done
+
+#               echo "  Extracting ImageNet-C archives..."
+#               cd "$IMAGENET_C_DIR"
+#               for TAR in *.tar; do
+#                 echo "  Extracting $TAR..."
+#                 tar -xf "$TAR" --strip-components=1 -C "$IMAGENET_C_DIR"
+#                 rm "$TAR"
+#               done
+
+#               # Verify ImageNet-C
+#               MISSING=0
+#               for CORR in gaussian_noise shot_noise impulse_noise \
+#                           defocus_blur glass_blur motion_blur zoom_blur \
+#                           snow frost fog brightness \
+#                           contrast elastic_transform pixelate jpeg_compression
+#               do
+#                 if [ -d "$IMAGENET_C_DIR/$CORR" ]; then
+#                   echo "  ✓ $CORR"
+#                 else
+#                   echo "  ✗ MISSING: $CORR"
+#                   MISSING=$((MISSING + 1))
+#                 fi
+#               done
+#               if [ "$MISSING" -ne 0 ]; then
+#                 echo "  ✗ $MISSING corruptions missing"
+#                 exit 1
+#               fi
+#               echo "  ✓ ImageNet-C ready"
+
+#               # ══════════════════════════════════════════
+#               #  DONE
+#               # ══════════════════════════════════════════
+#               echo ""
+#               echo "=========================================="
+#               echo "  All done! $(date)"
+#               echo "=========================================="
+#               df -h /pvc
+#               ls -lh /pvc/imagenet/
+
+#           env:
+#             - name: IMAGENET_USER
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: imagenet-secret
+#                   key: username
+#             - name: IMAGENET_PASS
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: imagenet-secret
+#                   key: password
+
+#           resources:
+#             requests:
+#               cpu: "10"
+#               memory: "20Gi"
+#             limits:
+#               cpu: "12" # 12/10 = 1.2 exactly ✓
+#               memory: "24Gi" # 24/20 = 1.2 exactly ✓
+
+#           volumeMounts:
+#             - name: data
+#               mountPath: /pvc
+
+#       volumes:
+#         - name: data
+#           persistentVolumeClaim:
+#             claimName: shape-resnet-pvc
+
+# # downloader-job.yaml
+# # ─────────────────────────────────────────────────────────────
+# # Downloads and extracts ImageNet + ImageNet-C.
+# # Skips steps already completed — safe to resubmit after interruption.
+# # All extraction goes directly to PVC — no ephemeral storage used.
+# #
+# # Current state on PVC:
+# #   ILSVRC2012_img_train.tar ✓ (138GB, complete)
+# #   ILSVRC2012_img_val.tar   ✓ (6.3GB, complete)
+# #   train/                   partial (needs re-extraction)
+# #   val/                     empty   (needs extraction)
+# #   ImageNet-C/              missing (needs download)
+# #
+# # Nautilus resource policy:
+# #   CPU  request=10, limit=12  → ratio 1.2 exactly  ✓
+# #   RAM  request=20Gi, limit=24Gi → ratio 1.2 exactly  ✓
+# #   No GPU  ✓
+# # ─────────────────────────────────────────────────────────────
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: imagenet-downloader
+#   namespace: kc-ai-research-lab
+# spec:
+#   backoffLimit: 2
+#   template:
+#     spec:
+#       restartPolicy: OnFailure
+#       containers:
+#         - name: downloader
+#           image: ubuntu:22.04
+#           command: ["/bin/bash", "-c"]
+#           args:
+#             - |
+#               set -e
+#               apt-get update -qq
+#               apt-get install -y -qq aria2 tar wget
+
+#               DATA_DIR="/pvc/imagenet"
+#               mkdir -p "$DATA_DIR/train" "$DATA_DIR/val"
+
+#               echo "=========================================="
+#               echo "  Step 1: ImageNet tars"
+#               echo "=========================================="
+
+#               if [ -f "$DATA_DIR/ILSVRC2012_img_train.tar" ]; then
+#                 echo "  [SKIP] train tar already exists"
+#               else
+#                 echo "  Downloading train tar (~138GB)..."
+#                 aria2c \
+#                   --http-user="$IMAGENET_USER" \
+#                   --http-passwd="$IMAGENET_PASS" \
+#                   --max-connection-per-server=16 \
+#                   --split=16 \
+#                   --min-split-size=100M \
+#                   --continue=true \
+#                   --max-tries=0 \
+#                   --retry-wait=10 \
+#                   --dir="$DATA_DIR" \
+#                   --out="ILSVRC2012_img_train.tar" \
+#                   "https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_train.tar"
+#               fi
+
+#               if [ -f "$DATA_DIR/ILSVRC2012_img_val.tar" ]; then
+#                 echo "  [SKIP] val tar already exists"
+#               else
+#                 echo "  Downloading val tar (~6.3GB)..."
+#                 aria2c \
+#                   --http-user="$IMAGENET_USER" \
+#                   --http-passwd="$IMAGENET_PASS" \
+#                   --max-connection-per-server=16 \
+#                   --split=16 \
+#                   --min-split-size=100M \
+#                   --continue=true \
+#                   --max-tries=0 \
+#                   --retry-wait=10 \
+#                   --dir="$DATA_DIR" \
+#                   --out="ILSVRC2012_img_val.tar" \
+#                   "https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_val.tar"
+#               fi
+
+#               echo "=========================================="
+#               echo "  Step 2: Extract train"
+#               echo "=========================================="
+
+#               # Count only directories (class folders), not tar files
+#               TRAIN_DIRS=$(find "$DATA_DIR/train" -mindepth 1 -maxdepth 1 -type d | wc -l)
+#               echo "  Train dirs found: $TRAIN_DIRS"
+
+#               if [ "$TRAIN_DIRS" -ge 1000 ]; then
+#                 echo "  [SKIP] Train already extracted ($TRAIN_DIRS classes)"
+#               else
+#                 echo "  Cleaning partial train extraction..."
+#                 rm -rf "$DATA_DIR/train"
+#                 mkdir -p "$DATA_DIR/train"
+#                 echo "  Extracting class tars from train tar (all to PVC)..."
+#                 tar -xf "$DATA_DIR/ILSVRC2012_img_train.tar" -C "$DATA_DIR/train"
+#                 echo "  Extracting images from each class tar..."
+#                 find "$DATA_DIR/train" -name "*.tar" | while read CLASS_TAR; do
+#                   CLASS=$(basename "$CLASS_TAR" .tar)
+#                   mkdir -p "$DATA_DIR/train/$CLASS"
+#                   tar -xf "$CLASS_TAR" -C "$DATA_DIR/train/$CLASS"
+#                   rm "$CLASS_TAR"
+#                 done
+#                 echo "  Train extraction done."
+#               fi
+
+#               echo "=========================================="
+#               echo "  Step 3: Extract val"
+#               echo "=========================================="
+
+#               VAL_DIRS=$(find "$DATA_DIR/val" -mindepth 1 -maxdepth 1 -type d | wc -l)
+#               echo "  Val dirs found: $VAL_DIRS"
+
+#               if [ "$VAL_DIRS" -ge 1000 ]; then
+#                 echo "  [SKIP] Val already extracted ($VAL_DIRS classes)"
+#               else
+#                 echo "  Cleaning partial val extraction..."
+#                 rm -rf "$DATA_DIR/val"
+#                 mkdir -p "$DATA_DIR/val"
+#                 echo "  Extracting val images (all to PVC)..."
+#                 tar -xf "$DATA_DIR/ILSVRC2012_img_val.tar" -C "$DATA_DIR/val"
+#                 echo "  Organising val into class folders..."
+#                 wget -qO /tmp/valprep.sh \
+#                   https://raw.githubusercontent.com/soumith/imagenetloader.torch/master/valprep.sh
+#                 cd "$DATA_DIR/val" && bash /tmp/valprep.sh
+#                 echo "  Val extraction done."
+#               fi
+
+#               # Verify ImageNet
+#               TRAIN_CLASSES=$(find "$DATA_DIR/train" -mindepth 1 -maxdepth 1 -type d | wc -l)
+#               VAL_CLASSES=$(find "$DATA_DIR/val"   -mindepth 1 -maxdepth 1 -type d | wc -l)
+#               echo "  Train classes: $TRAIN_CLASSES (expect 1000)"
+#               echo "  Val   classes: $VAL_CLASSES   (expect 1000)"
+#               if [ "$TRAIN_CLASSES" -ne 1000 ] || [ "$VAL_CLASSES" -ne 1000 ]; then
+#                 echo "  ImageNet verification failed"
+#                 exit 1
+#               fi
+#               echo "  ImageNet ready — cleaning up tars..."
+#               rm -f "$DATA_DIR/ILSVRC2012_img_train.tar"
+#               rm -f "$DATA_DIR/ILSVRC2012_img_val.tar"
+
+#               echo "=========================================="
+#               echo "  Step 4: Download ImageNet-C (~80GB)"
+#               echo "=========================================="
+
+#               IMAGENET_C_DIR="$DATA_DIR/ImageNet-C"
+#               mkdir -p "$IMAGENET_C_DIR"
+
+#               for NAME_URL in \
+#                 "noise.tar|https://zenodo.org/record/2235448/files/noise.tar" \
+#                 "blur.tar|https://zenodo.org/record/3565959/files/blur.tar" \
+#                 "weather.tar|https://zenodo.org/record/2235448/files/weather.tar" \
+#                 "digital.tar|https://zenodo.org/record/2235448/files/digital.tar" \
+#                 "extra.tar|https://zenodo.org/record/2235448/files/extra.tar"
+#               do
+#                 NAME=$(echo "$NAME_URL" | cut -d'|' -f1)
+#                 URL=$(echo "$NAME_URL"  | cut -d'|' -f2)
+#                 CORR=$(echo "$NAME" | cut -d'.' -f1)
+#                 if [ -d "$IMAGENET_C_DIR/$CORR" ]; then
+#                   echo "  [SKIP] $CORR already extracted"
+#                   continue
+#                 fi
+#                 echo "  Downloading $NAME..."
+#                 aria2c \
+#                   --max-connection-per-server=16 \
+#                   --split=16 \
+#                   --min-split-size=100M \
+#                   --continue=true \
+#                   --max-tries=0 \
+#                   --retry-wait=10 \
+#                   --dir="$IMAGENET_C_DIR" \
+#                   --out="$NAME" \
+#                   "$URL"
+#                 echo "  Extracting $NAME..."
+#                 tar -xf "$IMAGENET_C_DIR/$NAME" \
+#                   --strip-components=1 \
+#                   -C "$IMAGENET_C_DIR"
+#                 rm "$IMAGENET_C_DIR/$NAME"
+#               done
+
+#               # Verify ImageNet-C
+#               MISSING=0
+#               for CORR in gaussian_noise shot_noise impulse_noise \
+#                           defocus_blur glass_blur motion_blur zoom_blur \
+#                           snow frost fog brightness \
+#                           contrast elastic_transform pixelate jpeg_compression
+#               do
+#                 if [ -d "$IMAGENET_C_DIR/$CORR" ]; then
+#                   echo "  ✓ $CORR"
+#                 else
+#                   echo "  ✗ MISSING: $CORR"
+#                   MISSING=$((MISSING + 1))
+#                 fi
+#               done
+#               if [ "$MISSING" -ne 0 ]; then
+#                 echo "  $MISSING corruptions missing — check logs"
+#                 exit 1
+#               fi
+#               echo "  ImageNet-C ready"
+
+#               echo "=========================================="
+#               echo "  All done! $(date)"
+#               echo "=========================================="
+#               df -h /pvc
+#               ls -lh /pvc/imagenet/
+
+#           env:
+#             - name: IMAGENET_USER
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: imagenet-secret
+#                   key: username
+#             - name: IMAGENET_PASS
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: imagenet-secret
+#                   key: password
+
+#           resources:
+#             requests:
+#               cpu: "5"
+#               memory: "20Gi"
+#             limits:
+#               cpu: "6" # 12/10 = 1.2 exactly ✓
+#               memory: "24Gi" # 24/20 = 1.2 exactly ✓
+
+#           volumeMounts:
+#             - name: data
+#               mountPath: /pvc
+
+#       volumes:
+#         - name: data
+#           persistentVolumeClaim:
+#             claimName: shape-resnet-pvc
+
+# imagenetc-job.yaml
+# Downloads and extracts ImageNet-C only.
+# Skips corruptions already extracted — safe to resubmit.
+# No --strip-components — extracts named folders directly.
+#
+# Nautilus resource policy:
+#   CPU  request=5, limit=6   → ratio 1.2 exactly  ✓
+#   RAM  request=10Gi, limit=12Gi → ratio 1.2 exactly  ✓
+#   backoffLimit=0 — fail fast, investigate manually  ✓
+#
+# Submit:  kubectl apply -f k8s/imagenetc-job.yaml
+# Logs:    kubectl logs -f job/imagenetc-downloader -n kc-ai-research-lab
+# Delete:  kubectl delete job imagenetc-downloader -n kc-ai-research-lab
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: imagenetc-downloader
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: downloader
+          image: ubuntu:22.04
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              apt-get update -qq
+              apt-get install -y -qq aria2 tar
+
+              IMAGENET_C_DIR="/pvc/imagenet/ImageNet-C"
+              mkdir -p "$IMAGENET_C_DIR"
+
+              echo "$(date) Starting ImageNet-C download+extraction"
+
+              # Extract noise.tar if already on disk but not yet extracted
+              if [ -f "$IMAGENET_C_DIR/noise.tar" ] && [ ! -f "$IMAGENET_C_DIR/.noise_done" ]; then
+                echo "$(date) Extracting existing noise.tar..."
+                tar -xf "$IMAGENET_C_DIR/noise.tar" -C "$IMAGENET_C_DIR"
+                rm "$IMAGENET_C_DIR/noise.tar"
+                touch "$IMAGENET_C_DIR/.noise_done"
+                echo "$(date) noise extraction complete"
+              fi
+
+              for NAME_URL in \
+                "noise.tar|https://zenodo.org/record/2235448/files/noise.tar" \
+                "blur.tar|https://zenodo.org/record/3565959/files/blur.tar" \
+                "weather.tar|https://zenodo.org/record/2235448/files/weather.tar" \
+                "digital.tar|https://zenodo.org/record/2235448/files/digital.tar" \
+                "extra.tar|https://zenodo.org/record/2235448/files/extra.tar"
+              do
+                NAME=$(echo "$NAME_URL" | cut -d'|' -f1)
+                URL=$(echo "$NAME_URL"  | cut -d'|' -f2)
+                CORR=$(echo "$NAME"     | cut -d'.' -f1)
+
+                # Skip if already extracted — check for named corruption folders
+                # noise → gaussian_noise, blur → defocus_blur, etc.
+                # Use a marker file to track completion reliably
+                if [ -f "$IMAGENET_C_DIR/.${CORR}_done" ]; then
+                  echo "$(date) [SKIP] $CORR already done"
+                  continue
+                fi
+
+                # Skip download if tar already on disk
+                if [ -f "$IMAGENET_C_DIR/$NAME" ]; then
+                  echo "$(date) [SKIP DOWNLOAD] $NAME already on disk"
+                else
+                  echo "$(date) Downloading $NAME..."
+                  aria2c \
+                    --max-connection-per-server=16 \
+                    --split=16 \
+                    --min-split-size=100M \
+                    --continue=true \
+                    --max-tries=0 \
+                    --retry-wait=10 \
+                    --dir="$IMAGENET_C_DIR" \
+                    --out="$NAME" \
+                    "$URL"
+                  echo "$(date) $NAME download complete"
+                fi
+
+                echo "$(date) Extracting $NAME..."
+                tar -xf "$IMAGENET_C_DIR/$NAME" -C "$IMAGENET_C_DIR"
+                rm "$IMAGENET_C_DIR/$NAME"
+                touch "$IMAGENET_C_DIR/.${CORR}_done"
+                echo "$(date) $CORR extraction complete"
+              done
+
+              echo "====== Verification ======"
+              MISSING=0
+              for CORR in gaussian_noise shot_noise impulse_noise \
+                          defocus_blur glass_blur motion_blur zoom_blur \
+                          snow frost fog brightness \
+                          contrast elastic_transform pixelate jpeg_compression
+              do
+                if [ -d "$IMAGENET_C_DIR/$CORR" ]; then
+                  echo "  ✓ $CORR"
+                else
+                  echo "  ✗ MISSING: $CORR"
+                  MISSING=$((MISSING + 1))
+                fi
+              done
+              if [ "$MISSING" -ne 0 ]; then
+                echo "$MISSING corruptions missing"
+                exit 1
+              fi
+
+              echo "$(date) ImageNet-C complete!"
+              ls "$IMAGENET_C_DIR"
+              df -h /pvc
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2" # 6/5 = 1.2 exactly ✓
+              memory: "4Gi" # 12/10 = 1.2 exactly ✓
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc

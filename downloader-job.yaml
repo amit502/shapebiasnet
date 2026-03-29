@@ -514,11 +514,11 @@ spec:
               fi
 
               for NAME_URL in \
-                "noise.tar|https://zenodo.org/record/2235448/files/noise.tar" \
-                "blur.tar|https://zenodo.org/record/3565959/files/blur.tar" \
-                "weather.tar|https://zenodo.org/record/2235448/files/weather.tar" \
-                "digital.tar|https://zenodo.org/record/2235448/files/digital.tar" \
-                "extra.tar|https://zenodo.org/record/2235448/files/extra.tar"
+                "noise.tar|https://zenodo.org/records/2235448/files/noise.tar" \
+                "blur.tar|https://zenodo.org/records/2235448/files/blur.tar" \
+                "weather.tar|https://zenodo.org/records/2235448/files/weather.tar" \
+                "digital.tar|https://zenodo.org/records/2235448/files/digital.tar" \
+                "extra.tar|https://zenodo.org/records/2235448/files/extra.tar"
               do
                 NAME=$(echo "$NAME_URL" | cut -d'|' -f1)
                 URL=$(echo "$NAME_URL"  | cut -d'|' -f2)

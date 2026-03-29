@@ -87,7 +87,7 @@ spec:
               echo "=========================================="
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
-              python train.py \
+              python -u train.py \
                 --run_group   imagenet100_core \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
@@ -101,7 +101,7 @@ spec:
               echo "=========================================="
               echo "  Step 3: Clean Evaluation (ImageNet-100 val)"
               echo "=========================================="
-              python eval.py \
+              python -u eval.py \
                 --eval_group  imagenet100_core \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
@@ -117,7 +117,7 @@ spec:
               echo "=========================================="
               echo "  Step 4: Corruption Evaluation (ImageNet-100-C)"
               echo "=========================================="
-              python eval.py \
+              python -u eval.py \
                 --eval_group  imagenet100_core \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
@@ -164,6 +164,8 @@ spec:
                   key: token
             - name: PYTORCH_CUDA_ALLOC_CONF
               value: "expandable_segments:True"
+            - name: PYTHONUNBUFFERED
+              value: "1"
 
           volumeMounts:
             - name: data

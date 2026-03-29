@@ -1,0 +1,88 @@
+# imagenet100-downloader-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Downloads ImageNet-100 from HuggingFace (clane9/imagenet-100).
+# ~15GB total. No gated access required.
+# Does NOT touch /pvc/imagenet/ (full ImageNet preserved).
+#
+# Output:
+#   /pvc/imagenet100/train/<label>/   (100 classes, ~128K images)
+#   /pvc/imagenet100/val/<label>/     (100 classes, ~5K images)
+#
+# Nautilus resource policy:
+#   CPU  request=5, limit=6   → ratio 1.2 exactly  ✓
+#   RAM  request=20Gi, limit=24Gi → ratio 1.2 exactly  ✓
+#   No GPU  ✓
+#   backoffLimit=0  ✓
+#
+# Submit:  kubectl apply -f k8s/imagenet100-downloader-job.yaml
+# Logs:    kubectl logs -f job/imagenet100-downloader -n kc-ai-research-lab
+# Delete:  kubectl delete job imagenet100-downloader -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: imagenet100-downloader
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: downloader
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              pip install -q datasets Pillow
+
+              DATA_DIR="/pvc/imagenet100"
+              mkdir -p "$DATA_DIR/train" "$DATA_DIR/val"
+
+              echo "$(date) Starting ImageNet-100 download"
+              echo "  Output : $DATA_DIR"
+              echo "  Full ImageNet untouched at /pvc/imagenet/"
+
+              TRAIN_COUNT=$(find "$DATA_DIR/train" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+              VAL_COUNT=$(find "$DATA_DIR/val" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+
+              if [ "$TRAIN_COUNT" -ge 100 ] && [ "$VAL_COUNT" -ge 100 ]; then
+                echo "  [SKIP] Already done ($TRAIN_COUNT train, $VAL_COUNT val classes)"
+              else
+                echo "aW1wb3J0IG9zCmZyb20gZGF0YXNldHMgaW1wb3J0IGxvYWRfZGF0YXNldCwgRG93bmxvYWRDb25maWcKCmRhdGFfZGlyICA9ICIvcHZjL2ltYWdlbmV0MTAwIgpjYWNoZV9kaXIgPSBkYXRhX2RpciArICIvaGZfY2FjaGUiCgpkbF9jb25maWcgPSBEb3dubG9hZENvbmZpZygKICAgIGNhY2hlX2Rpcj1jYWNoZV9kaXIsCiAgICBtYXhfcmV0cmllcz0yMCwKICAgIHJlc3VtZV9kb3dubG9hZD1UcnVlLAogICAgbnVtX3Byb2M9NCwKKQoKZGVmIHNhdmVfc3BsaXQoc3BsaXRfbmFtZSwgb3V0X2Rpcik6CiAgICBwcmludCgiTG9hZGluZyAiICsgc3BsaXRfbmFtZSArICIgc3BsaXQuLi4iKQogICAgZHMgPSBsb2FkX2RhdGFzZXQoCiAgICAgICAgImNsYW5lOS9pbWFnZW5ldC0xMDAiLAogICAgICAgIHNwbGl0PXNwbGl0X25hbWUsCiAgICAgICAgY2FjaGVfZGlyPWNhY2hlX2RpciwKICAgICAgICBkb3dubG9hZF9jb25maWc9ZGxfY29uZmlnLAogICAgKQogICAgbGFiZWxzID0gc2V0KGRzWyJsYWJlbCJdKQogICAgcHJpbnQoIiAgIiArIHN0cihsZW4oZHMpKSArICIgaW1hZ2VzLCAiICsgc3RyKGxlbihsYWJlbHMpKSArICIgY2xhc3NlcyIpCiAgICBvcy5tYWtlZGlycyhvdXRfZGlyLCBleGlzdF9vaz1UcnVlKQogICAgZm9yIGksIHNhbXBsZSBpbiBlbnVtZXJhdGUoZHMpOgogICAgICAgIGxhYmVsICAgICA9IHN0cihzYW1wbGVbImxhYmVsIl0pLnpmaWxsKDQpCiAgICAgICAgY2xhc3NfZGlyID0gb3MucGF0aC5qb2luKG91dF9kaXIsIGxhYmVsKQogICAgICAgIG9zLm1ha2VkaXJzKGNsYXNzX2RpciwgZXhpc3Rfb2s9VHJ1ZSkKICAgICAgICBpbWdfcGF0aCAgPSBvcy5wYXRoLmpvaW4oY2xhc3NfZGlyLCBzdHIoaSkuemZpbGwoOCkgKyAiLkpQRUciKQogICAgICAgIGlmIG5vdCBvcy5wYXRoLmV4aXN0cyhpbWdfcGF0aCk6CiAgICAgICAgICAgIGltZyA9IHNhbXBsZVsiaW1hZ2UiXQogICAgICAgICAgICBpZiBpbWcubW9kZSAhPSAiUkdCIjoKICAgICAgICAgICAgICAgIGltZyA9IGltZy5jb252ZXJ0KCJSR0IiKQogICAgICAgICAgICBpbWcuc2F2ZShpbWdfcGF0aCwgIkpQRUciLCBxdWFsaXR5PTk1KQogICAgICAgIGlmIGkgJSAxMDAwMCA9PSAwOgogICAgICAgICAgICBwcmludCgiICAiICsgc3BsaXRfbmFtZSArICI6ICIgKyBzdHIoaSkgKyAiLyIgKyBzdHIobGVuKGRzKSkpCiAgICBwcmludCgiICAiICsgc3BsaXRfbmFtZSArICIgZG9uZSIpCgpzYXZlX3NwbGl0KCJ0cmFpbiIsICAgICAgIi9wdmMvaW1hZ2VuZXQxMDAvdHJhaW4iKQpzYXZlX3NwbGl0KCJ2YWxpZGF0aW9uIiwgIi9wdmMvaW1hZ2VuZXQxMDAvdmFsIikKCmltcG9ydCBzaHV0aWwKc2h1dGlsLnJtdHJlZShjYWNoZV9kaXIsIGlnbm9yZV9lcnJvcnM9VHJ1ZSkKcHJpbnQoIkFsbCBkb25lISIpCg==" | base64 -d > /tmp/download_imagenet100.py
+                python3 /tmp/download_imagenet100.py
+              fi
+
+              TRAIN_CLASSES=$(find "$DATA_DIR/train" -mindepth 1 -maxdepth 1 -type d | wc -l)
+              VAL_CLASSES=$(find "$DATA_DIR/val"   -mindepth 1 -maxdepth 1 -type d | wc -l)
+              TRAIN_IMGS=$(find "$DATA_DIR/train" -name "*.JPEG" | wc -l)
+              VAL_IMGS=$(find "$DATA_DIR/val"   -name "*.JPEG" | wc -l)
+              echo ""
+              echo "  Train: $TRAIN_CLASSES classes, $TRAIN_IMGS images (expect 100, ~128000)"
+              echo "  Val  : $VAL_CLASSES classes, $VAL_IMGS images   (expect 100, ~5000)"
+              if [ "$TRAIN_CLASSES" -ne 100 ] || [ "$VAL_CLASSES" -ne 100 ]; then
+                echo "  [ERROR] Verification failed"
+                exit 1
+              fi
+
+              echo "$(date) ImageNet-100 ready!"
+              du -sh "$DATA_DIR/train" "$DATA_DIR/val"
+              df -h /pvc
+
+          resources:
+            requests:
+              cpu: "1"
+              memory: "8Gi"
+            limits:
+              cpu: "1" # 6/5 = 1.2 exactly ✓
+              memory: "8Gi" # 24/20 = 1.2 exactly ✓
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc

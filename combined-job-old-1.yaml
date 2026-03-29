@@ -1,0 +1,717 @@
+# # combined-job.yaml
+# # ─────────────────────────────────────────────────────────────
+# # Full pipeline: clone → train → clean eval → corrupt eval → profile
+# #
+# # EXPERIMENT GROUPS — edit RUN_GROUP to select what to run:
+# #
+# #   imagenet_core     : baseline_res50 + shape_res50           (Round 1)
+# #   imagenet_deep     : baseline_res101 + shape_res101          (Round 2)
+# #   imagenet_convnext : baseline_convnext_tiny + shape_convnext_tiny (Round 3)
+# #   imagenet_effnet   : baseline_efficientnet_b4 + shape_effnet_b4  (Round 4)
+# #   imagenet_all      : all rounds combined
+# #
+# # To run a SINGLE model (no pair), replace --run_group with --model <name>
+# #
+# # Prerequisites (run once):
+# #   kubectl create secret generic github-pat \
+# #     --from-literal=token=<your-PAT> \
+# #     -n kc-ai-research-lab
+# #
+# # Nautilus resource policy:
+# #   CPU  request=20, limit=24  → ratio 24/20 = 1.2 exactly  ✓
+# #   RAM  request=60Gi, limit=72Gi → ratio 72/60 = 1.2 exactly  ✓
+# #   GPU  request=4, limit=4    → limits == requests  ✓
+# #   CPU values are integers  ✓
+# #   backoffLimit=4 for preemption tolerance  ✓
+# #
+# # Submit:  kubectl apply -f k8s/combined-job.yaml
+# # Logs:    kubectl logs -f job/shape-resnet-pipeline -n kc-ai-research-lab
+# # Delete:  kubectl delete job shape-resnet-pipeline -n kc-ai-research-lab
+# # ─────────────────────────────────────────────────────────────
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: shape-resnet-pipeline
+#   namespace: kc-ai-research-lab
+# spec:
+#   backoffLimit: 0
+
+#   template:
+#     spec:
+#       restartPolicy: OnFailure
+
+#       containers:
+#         - name: pipeline
+#           image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+#           command: ["/bin/bash", "-c"]
+#           args:
+#             - |
+#               set -e
+
+#               # ── Step 0: Clone repo ────────────────────────────
+#               echo "=========================================="
+#               echo "  Step 0: Cloning repo (branch: review)"
+#               echo "=========================================="
+#               git clone \
+#                 --branch review \
+#                 --single-branch \
+#                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+#                 /shapebiasnet
+#               cd /shapebiasnet
+
+#               # ── Step 1: Dependencies ──────────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 1: Installing dependencies"
+#               echo "=========================================="
+#               pip install -r requirements.txt --quiet
+
+#               # ── Create output dirs on PVC ─────────────────────
+#               mkdir -p /pvc/checkpoints /pvc/results
+
+#               # ── Step 2: Train ─────────────────────────────────
+#               # Runs the selected experiment group (baseline + shape pair).
+#               # Auto-resumes from checkpoint if job was preempted.
+#               # To run a single model: replace --run_group with --model <name>
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 2: Training (clean data only)"
+#               echo "=========================================="
+#               python train.py \
+#                 --run_group   imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --epochs      90 \
+#                 --batch       256 \
+#                 --workers     8
+
+#               # ── Step 3: Clean Evaluation ──────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 3: Clean Evaluation (ImageNet val)"
+#               echo "=========================================="
+#               python eval.py \
+#                 --eval_group  imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --results_dir /pvc/results \
+#                 --batch       256 \
+#                 --workers     8 \
+#                 --clean_only
+
+#               # ── Step 4: Corruption Evaluation ─────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 4: Corruption Evaluation (ImageNet-C)"
+#               echo "=========================================="
+#               python eval.py \
+#                 --eval_group  imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --results_dir /pvc/results \
+#                 --batch       256 \
+#                 --workers     8 \
+#                 --corrupt_only
+
+#               # ── Step 5: Efficiency Profiling ──────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 5: Efficiency Profiling"
+#               echo "=========================================="
+#               python profiler.py \
+#                 --dataset     imagenet \
+#                 --results_dir /pvc/results \
+#                 --warmup      20 \
+#                 --runs        100
+
+#               # ── Done ──────────────────────────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Pipeline complete. Results:"
+#               echo "=========================================="
+#               ls -lh /pvc/results/
+#               ls -lh /pvc/checkpoints/
+
+#           resources:
+#             requests:
+#               cpu: "20"
+#               memory: "60Gi"
+#               nvidia.com/a100: "4" # A100s available in kc-ai-research-lab
+#             limits:
+#               cpu: "24" # 24/20 = 1.2 exactly ✓
+#               memory: "72Gi" # 72/60 = 1.2 exactly ✓
+#               nvidia.com/a100: "4" # limits == requests ✓
+
+#           env:
+#             - name: GITHUB_PAT
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: github-pat
+#                   key: token
+#             - name: NCCL_DEBUG
+#               value: "WARN"
+#             - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+#               value: "1"
+
+#           volumeMounts:
+#             - name: data
+#               mountPath: /pvc
+
+#       volumes:
+#         - name: data
+#           persistentVolumeClaim:
+#             claimName: shape-resnet-pvc
+
+#       tolerations:
+#         - key: "nvidia.com/a100"
+#           operator: "Exists"
+#           effect: "NoSchedule"
+
+# combined-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Full pipeline: clone → train → clean eval → corrupt eval → profile
+#
+# EXPERIMENT GROUPS — edit RUN_GROUP to select what to run:
+#
+#   imagenet_core     : baseline_res50 + shape_res50           (Round 1)
+#   imagenet_deep     : baseline_res101 + shape_res101          (Round 2)
+#   imagenet_convnext : baseline_convnext_tiny + shape_convnext_tiny (Round 3)
+#   imagenet_effnet   : baseline_efficientnet_b4 + shape_effnet_b4  (Round 4)
+#   imagenet_all      : all rounds combined
+#
+# To run a SINGLE model (no pair), replace --run_group with --model <name>
+#
+# Prerequisites (run once):
+#   kubectl create secret generic github-pat \
+#     --from-literal=token=<your-PAT> \
+#     -n kc-ai-research-lab
+#
+# Nautilus resource policy:
+#   CPU  request=20, limit=24  → ratio 24/20 = 1.2 exactly  ✓
+#   RAM  request=60Gi, limit=72Gi → ratio 72/60 = 1.2 exactly  ✓
+#   GPU  request=4, limit=4    → limits == requests  ✓
+#   CPU values are integers  ✓
+#   backoffLimit=4 for preemption tolerance  ✓
+#
+# Submit:  kubectl apply -f k8s/combined-job.yaml
+# Logs:    kubectl logs -f job/shape-resnet-pipeline -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-resnet-pipeline -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: shape-resnet-pipeline
+#   namespace: kc-ai-research-lab
+# spec:
+#   backoffLimit: 0 # no auto-retry — resubmit manually after investigating logs
+
+#   template:
+#     spec:
+#       restartPolicy: Never # pod does not restart on failure
+
+#       containers:
+#         - name: pipeline
+#           image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+#           command: ["/bin/bash", "-c"]
+#           args:
+#             - |
+#               set -e
+
+#               # ── Step 0: Clone repo ────────────────────────────
+#               echo "=========================================="
+#               echo "  Step 0: Cloning repo (branch: review)"
+#               echo "=========================================="
+#               apt-get update -qq && apt-get install -y -qq git
+#               git clone \
+#                 --branch review \
+#                 --single-branch \
+#                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+#                 /shapebiasnet
+#               cd /shapebiasnet
+
+#               # ── Step 1: Dependencies ──────────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 1: Installing dependencies"
+#               echo "=========================================="
+#               pip install -r requirements.txt --quiet
+
+#               # ── Create output dirs on PVC ─────────────────────
+#               mkdir -p /pvc/checkpoints /pvc/results
+
+#               # ── Step 2: Train ─────────────────────────────────
+#               # Runs the selected experiment group (baseline + shape pair).
+#               # Auto-resumes from checkpoint if job was preempted.
+#               # To run a single model: replace --run_group with --model <name>
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 2: Training (clean data only)"
+#               echo "=========================================="
+#               python train.py \
+#                 --run_group   imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --epochs      90 \
+#                 --batch       256 \
+#                 --workers     4
+
+#               # ── Step 3: Clean Evaluation ──────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 3: Clean Evaluation (ImageNet val)"
+#               echo "=========================================="
+#               python eval.py \
+#                 --eval_group  imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --results_dir /pvc/results \
+#                 --batch       256 \
+#                 --workers     4 \
+#                 --clean_only
+
+#               # ── Step 4: Corruption Evaluation ─────────────────
+#               # Runs with || true — if ImageNet-C not ready, job continues
+#               # and saves a skip notice. Rerun separately when ImageNet-C ready.
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 4: Corruption Evaluation (ImageNet-C)"
+#               echo "=========================================="
+#               python eval.py \
+#                 --eval_group  imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --results_dir /pvc/results \
+#                 --batch       256 \
+#                 --workers     4 \
+#                 --corrupt_only || echo "  [WARN] Corrupt eval failed — ImageNet-C may not be ready. Rerun corrupt eval separately."
+
+#               # ── Step 5: Efficiency Profiling ──────────────────
+#               # Also non-fatal — runs regardless of Step 4 outcome.
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 5: Efficiency Profiling"
+#               echo "=========================================="
+#               python profiler.py \
+#                 --dataset     imagenet \
+#                 --results_dir /pvc/results \
+#                 --warmup      20 \
+#                 --runs        100 || echo "  [WARN] Profiling failed — check logs."
+
+#               # ── Done ──────────────────────────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Pipeline complete. Results:"
+#               echo "=========================================="
+#               ls -lh /pvc/results/
+#               ls -lh /pvc/checkpoints/
+
+#           resources:
+#             requests:
+#               cpu: "20"
+#               memory: "60Gi"
+#               nvidia.com/gpu: "4" # gpu available in kc-ai-research-lab
+#             limits:
+#               cpu: "24" # 24/20 = 1.2 exactly ✓
+#               memory: "72Gi" # 72/60 = 1.2 exactly ✓
+#               nvidia.com/gpu: "4" # limits == requests ✓
+
+#           env:
+#             - name: GITHUB_PAT
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: github-pat
+#                   key: token
+#             - name: NCCL_DEBUG
+#               value: "WARN"
+#             - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+#               value: "1"
+
+#           volumeMounts:
+#             - name: data
+#               mountPath: /pvc
+#             - name: shm # ADD THIS
+#               mountPath: /dev/shm # ADD THIS
+
+#       volumes:
+#         - name: data
+#           persistentVolumeClaim:
+#             claimName: shape-resnet-pvc
+#         - name: shm # ADD THIS
+#           emptyDir: # ADD THIS
+#             medium: Memory # ADD THIS
+#             sizeLimit: 16Gi # ADD THIS
+
+#       tolerations:
+#         - key: "nvidia.com/gpu"
+#           operator: "Exists"
+#           effect: "NoSchedule"
+
+# combined-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Full pipeline: clone → train → clean eval → corrupt eval → profile
+#
+# EXPERIMENT GROUPS — edit RUN_GROUP to select what to run:
+#
+#   imagenet_core     : baseline_res50 + shape_res50           (Round 1)
+#   imagenet_deep     : baseline_res101 + shape_res101          (Round 2)
+#   imagenet_convnext : baseline_convnext_tiny + shape_convnext_tiny (Round 3)
+#   imagenet_effnet   : baseline_efficientnet_b4 + shape_effnet_b4  (Round 4)
+#   imagenet_all      : all rounds combined
+#
+# To run a SINGLE model replace --run_group with --model <name>
+#
+# Nautilus resource policy:
+#   CPU  request=20, limit=24  → ratio 24/20 = 1.2 exactly  ✓
+#   RAM  request=60Gi, limit=72Gi → ratio 72/60 = 1.2 exactly  ✓
+#   GPU  request=4, limit=4    → limits == requests  ✓
+#   backoffLimit=0 — fail fast, investigate manually  ✓
+#
+# Submit:  kubectl apply -f k8s/combined-job.yaml
+# Logs:    kubectl logs -f job/shape-resnet-pipeline -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-resnet-pipeline -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: shape-resnet-pipeline
+#   namespace: kc-ai-research-lab
+# spec:
+#   backoffLimit: 0
+
+#   template:
+#     spec:
+#       restartPolicy: Never
+#       nodeSelector:
+#         nvidia.com/gpu.product: NVIDIA-GeForce-RTX-3090
+
+#       containers:
+#         - name: pipeline
+#           image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+#           command: ["/bin/bash", "-c"]
+#           args:
+#             - |
+#               set -e
+
+#               # ── Step 0: Clone repo ────────────────────────────
+#               echo "=========================================="
+#               echo "  Step 0: Cloning repo (branch: review)"
+#               echo "=========================================="
+#               apt-get update -qq && apt-get install -y -qq git
+#               git clone \
+#                 --branch review \
+#                 --single-branch \
+#                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+#                 /shapebiasnet
+#               cd /shapebiasnet
+
+#               # ── Step 1: Dependencies ──────────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 1: Installing dependencies"
+#               echo "=========================================="
+#               pip install -r requirements.txt --quiet
+
+#               # ── Create output dirs on PVC ─────────────────────
+#               mkdir -p /pvc/checkpoints /pvc/results
+
+#               # ── Step 2: Train ─────────────────────────────────
+#               # batch=64 + accum_steps=4 → effective batch = 256
+#               # Fits on 11GB GPUs. Auto-resumes from checkpoint if preempted.
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 2: Training (clean data only)"
+#               echo "=========================================="
+#               python train.py \
+#                 --run_group   imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --epochs      90 \
+#                 --batch       256 \
+#                 --accum_steps 1 \
+#                 --workers     4
+
+#               # ── Step 3: Clean Evaluation ──────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 3: Clean Evaluation (ImageNet val)"
+#               echo "=========================================="
+#               python eval.py \
+#                 --eval_group  imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --results_dir /pvc/results \
+#                 --batch       256 \
+#                 --workers     4 \
+#                 --clean_only
+
+#               # ── Step 4: Corruption Evaluation ─────────────────
+#               # Non-fatal — if ImageNet-C not ready, prints warning and continues.
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 4: Corruption Evaluation (ImageNet-C)"
+#               echo "=========================================="
+#               python eval.py \
+#                 --eval_group  imagenet_core \
+#                 --dataset     imagenet \
+#                 --data_dir    /pvc/imagenet \
+#                 --ckpt_dir    /pvc/checkpoints \
+#                 --results_dir /pvc/results \
+#                 --batch       256 \
+#                 --workers     4 \
+#                 --corrupt_only || echo "  [WARN] Corrupt eval failed — ImageNet-C may not be ready."
+
+#               # ── Step 5: Efficiency Profiling ──────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Step 5: Efficiency Profiling"
+#               echo "=========================================="
+#               python profiler.py \
+#                 --dataset     imagenet \
+#                 --results_dir /pvc/results \
+#                 --warmup      20 \
+#                 --runs        100 || echo "  [WARN] Profiling failed — check logs."
+
+#               # ── Done ──────────────────────────────────────────
+#               echo ""
+#               echo "=========================================="
+#               echo "  Pipeline complete. Results:"
+#               echo "=========================================="
+#               ls -lh /pvc/results/
+#               ls -lh /pvc/checkpoints/
+
+#           resources:
+#             requests:
+#               cpu: "5"
+#               memory: "20Gi"
+#               nvidia.com/gpu: "2"
+#             limits:
+#               cpu: "6" # 24/20 = 1.2 exactly ✓
+#               memory: "24Gi" # 72/60 = 1.2 exactly ✓
+#               nvidia.com/gpu: "2" # limits == requests ✓
+
+#           env:
+#             - name: GITHUB_PAT
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: github-pat
+#                   key: token
+#             - name: NCCL_DEBUG
+#               value: "WARN"
+#             - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+#               value: "1"
+#             - name: PYTORCH_CUDA_ALLOC_CONF
+#               value: "expandable_segments:True"
+
+#           volumeMounts:
+#             - name: data
+#               mountPath: /pvc
+#             - name: shm
+#               mountPath: /dev/shm
+
+#       volumes:
+#         - name: data
+#           persistentVolumeClaim:
+#             claimName: shape-resnet-pvc
+#         - name: shm
+#           emptyDir:
+#             medium: Memory
+#             sizeLimit: 16Gi
+
+#       tolerations:
+#         - key: "nvidia.com/gpu"
+#           operator: "Exists"
+#           effect: "NoSchedule"
+
+# combined-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Full pipeline: clone → train → clean eval → corrupt eval → profile
+#
+# EXPERIMENT GROUPS — edit RUN_GROUP to select what to run:
+#
+#   imagenet_core     : baseline_res50 + shape_res50           (Round 1)
+#   imagenet_deep     : baseline_res101 + shape_res101          (Round 2)
+#   imagenet_convnext : baseline_convnext_tiny + shape_convnext_tiny (Round 3)
+#   imagenet_effnet   : baseline_efficientnet_b4 + shape_effnet_b4  (Round 4)
+#   imagenet_all      : all rounds combined
+#
+# To run a SINGLE model replace --run_group with --model <name>
+#
+# Nautilus resource policy:
+#   CPU  request=20, limit=24  → ratio 24/20 = 1.2 exactly  ✓
+#   RAM  request=60Gi, limit=72Gi → ratio 72/60 = 1.2 exactly  ✓
+#   GPU  request=4, limit=4    → limits == requests  ✓
+#   backoffLimit=0 — fail fast, investigate manually  ✓
+#
+# Submit:  kubectl apply -f k8s/combined-job.yaml
+# Logs:    kubectl logs -f job/shape-resnet-pipeline -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-resnet-pipeline -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-resnet-pipeline
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      # - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-RTX-5000-Ada-Generation
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              # ── Step 0: Clone repo ────────────────────────────
+              echo "=========================================="
+              echo "  Step 0: Cloning repo (branch: review)"
+              echo "=========================================="
+              apt-get update -qq && apt-get install -y -qq git
+              git clone \
+                --branch review \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              # ── Step 1: Dependencies ──────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 1: Installing dependencies"
+              echo "=========================================="
+              pip install -r requirements.txt --quiet
+
+              # ── Create output dirs on PVC ─────────────────────
+              mkdir -p /pvc/checkpoints /pvc/results
+
+              # ── Step 2: Train ─────────────────────────────────
+              # batch=64 + accum_steps=4 → effective batch = 256
+              # Fits on 11GB GPUs. Auto-resumes from checkpoint if preempted.
+              echo ""
+              echo "=========================================="
+              echo "  Step 2: Training (clean data only)"
+              echo "=========================================="
+              python train.py \
+                --run_group   imagenet_core \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --epochs      90 \
+                --batch       256 \
+                --accum_steps 4 \
+                --workers     4
+
+              # ── Step 3: Clean Evaluation ──────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 3: Clean Evaluation (ImageNet val)"
+              echo "=========================================="
+              python eval.py \
+                --eval_group  imagenet_core \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --results_dir /pvc/results \
+                --batch       256 \
+                --workers     4 \
+                --clean_only
+
+              # ── Step 4: Corruption Evaluation ─────────────────
+              # Non-fatal — if ImageNet-C not ready, prints warning and continues.
+              echo ""
+              echo "=========================================="
+              echo "  Step 4: Corruption Evaluation (ImageNet-C)"
+              echo "=========================================="
+              python eval.py \
+                --eval_group  imagenet_core \
+                --dataset     imagenet \
+                --data_dir    /pvc/imagenet \
+                --ckpt_dir    /pvc/checkpoints \
+                --results_dir /pvc/results \
+                --batch       256 \
+                --workers     4 \
+                --corrupt_only || echo "  [WARN] Corrupt eval failed — ImageNet-C may not be ready."
+
+              # ── Step 5: Efficiency Profiling ──────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 5: Efficiency Profiling"
+              echo "=========================================="
+              python profiler.py \
+                --dataset     imagenet \
+                --results_dir /pvc/results \
+                --warmup      20 \
+                --runs        100 || echo "  [WARN] Profiling failed — check logs."
+
+              # ── Done ──────────────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Pipeline complete. Results:"
+              echo "=========================================="
+              ls -lh /pvc/results/
+              ls -lh /pvc/checkpoints/
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "20Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4" # 6/5 = 1.2 exactly ✓
+              memory: "24Gi" # 24/20 = 1.2 exactly ✓
+              nvidia.com/gpu: "1" # limits == requests ✓
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

@@ -1,0 +1,68 @@
+# imagenet100c-generator-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Generates ImageNet-100-C by applying 15 corruptions × 5 severities
+# to the ImageNet-100 val set using the imagecorruptions library.
+#
+# Output:
+#   /pvc/imagenet100/ImageNet-100-C/<corruption>/<severity>/<class>/
+#
+# Fully resumable — uses .done marker files per (corruption, severity).
+# Safe to resubmit if interrupted.
+#
+# Nautilus resource policy:
+#   CPU  request=5, limit=6   → ratio 1.2 exactly  ✓
+#   RAM  request=10Gi, limit=12Gi → ratio 1.2 exactly  ✓
+#   No GPU needed  ✓
+#   backoffLimit=0  ✓
+#
+# Submit:  kubectl apply -f k8s/imagenet100c-generator-job.yaml
+# Logs:    kubectl logs -f job/imagenet100c-generator -n kc-ai-research-lab
+# Delete:  kubectl delete job imagenet100c-generator -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: imagenet100c-generator
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generator
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              apt-get update -qq && apt-get install -y -qq libxcb1 libglib2.0-0
+              pip install -q imagecorruptions Pillow
+
+              echo "$(date) Generating ImageNet-100-C"
+              echo "  Source : /pvc/imagenet100/val"
+              echo "  Output : /pvc/imagenet100/ImageNet-100-C"
+
+              echo aW1wb3J0IG9zLCBudW1weSBhcyBucApmcm9tIFBJTCBpbXBvcnQgSW1hZ2UKZnJvbSBpbWFnZWNvcnJ1cHRpb25zIGltcG9ydCBjb3JydXB0CgpEQVRBX0RJUiAgID0gIi9wdmMvaW1hZ2VuZXQxMDAiClZBTF9ESVIgICAgPSBEQVRBX0RJUiArICIvdmFsIgpPVVRfRElSICAgID0gREFUQV9ESVIgKyAiL0ltYWdlTmV0LTEwMC1DIgoKQ09SUlVQVElPTlMgPSBbCiAgICAiZ2F1c3NpYW5fbm9pc2UiLCAic2hvdF9ub2lzZSIsICJpbXB1bHNlX25vaXNlIiwKICAgICJkZWZvY3VzX2JsdXIiLCAiZ2xhc3NfYmx1ciIsICJtb3Rpb25fYmx1ciIsICJ6b29tX2JsdXIiLAogICAgInNub3ciLCAiZnJvc3QiLCAiZm9nIiwgImJyaWdodG5lc3MiLAogICAgImNvbnRyYXN0IiwgImVsYXN0aWNfdHJhbnNmb3JtIiwgInBpeGVsYXRlIiwgImpwZWdfY29tcHJlc3Npb24iLApdCgpjbGFzc2VzID0gc29ydGVkKG9zLmxpc3RkaXIoVkFMX0RJUikpCnByaW50KCJDbGFzc2VzOiAiICsgc3RyKGxlbihjbGFzc2VzKSkpCnByaW50KCJDb3JydXB0aW9uczogIiArIHN0cihsZW4oQ09SUlVQVElPTlMpKSkKCmZvciBjb3JyIGluIENPUlJVUFRJT05TOgogICAgcHJpbnQoIlByb2Nlc3Npbmc6ICIgKyBjb3JyKQogICAgZm9yIHNldiBpbiByYW5nZSgxLCA2KToKICAgICAgICBkb25lX21hcmtlciA9IE9VVF9ESVIgKyAiLyIgKyBjb3JyICsgIi8iICsgc3RyKHNldikgKyAiLy5kb25lIgogICAgICAgIGlmIG9zLnBhdGguZXhpc3RzKGRvbmVfbWFya2VyKToKICAgICAgICAgICAgcHJpbnQoIiAgW1NLSVBdICIgKyBjb3JyICsgIi8iICsgc3RyKHNldikpCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgcHJpbnQoIiAgc2V2ZXJpdHkgIiArIHN0cihzZXYpICsgIi4uLiIpCiAgICAgICAgY291bnQgPSAwCiAgICAgICAgZm9yIGNscyBpbiBjbGFzc2VzOgogICAgICAgICAgICBjbHNfdmFsICA9IG9zLnBhdGguam9pbihWQUxfRElSLCBjbHMpCiAgICAgICAgICAgIGNsc19vdXQgID0gb3MucGF0aC5qb2luKE9VVF9ESVIsIGNvcnIsIHN0cihzZXYpLCBjbHMpCiAgICAgICAgICAgIG9zLm1ha2VkaXJzKGNsc19vdXQsIGV4aXN0X29rPVRydWUpCiAgICAgICAgICAgIGZvciBpbWdfZmlsZSBpbiBvcy5saXN0ZGlyKGNsc192YWwpOgogICAgICAgICAgICAgICAgaWYgbm90IGltZ19maWxlLmxvd2VyKCkuZW5kc3dpdGgoKCIuanBlZyIsICIuanBnIiwgIi5wbmciKSk6CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIG91dF9wYXRoID0gb3MucGF0aC5qb2luKGNsc19vdXQsIGltZ19maWxlKQogICAgICAgICAgICAgICAgaWYgb3MucGF0aC5leGlzdHMob3V0X3BhdGgpOgogICAgICAgICAgICAgICAgICAgIGNvdW50ICs9IDEKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgaW1nID0gSW1hZ2Uub3Blbihvcy5wYXRoLmpvaW4oY2xzX3ZhbCwgaW1nX2ZpbGUpKS5jb252ZXJ0KCJSR0IiKQogICAgICAgICAgICAgICAgaW1nID0gaW1nLnJlc2l6ZSgoMjI0LCAyMjQpLCBJbWFnZS5CSUxJTkVBUikKICAgICAgICAgICAgICAgIGFyciA9IG5wLmFycmF5KGltZywgZHR5cGU9bnAudWludDgpCiAgICAgICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgYXJyX2MgPSBjb3JydXB0KGFyciwgY29ycnVwdGlvbl9uYW1lPWNvcnIsIHNldmVyaXR5PXNldikKICAgICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgICAgICAgICBwcmludCgiICAgIFdBUk46ICIgKyBzdHIoZSkpCiAgICAgICAgICAgICAgICAgICAgYXJyX2MgPSBhcnIKICAgICAgICAgICAgICAgIEltYWdlLmZyb21hcnJheShhcnJfYykuc2F2ZShvdXRfcGF0aCwgIkpQRUciLCBxdWFsaXR5PTg1KQogICAgICAgICAgICAgICAgY291bnQgKz0gMQogICAgICAgIG9wZW4oZG9uZV9tYXJrZXIsICJ3IikuY2xvc2UoKQogICAgICAgIHByaW50KCIgIGRvbmU6ICIgKyBzdHIoY291bnQpICsgIiBpbWFnZXMiKQoKcHJpbnQoIkltYWdlTmV0LTEwMC1DIGdlbmVyYXRpb24gY29tcGxldGUhIikK | base64 -d > /tmp/gen_imagenet100c.py
+              python3 /tmp/gen_imagenet100c.py
+
+              echo "$(date) Done!"
+              du -sh /pvc/imagenet100/ImageNet-100-C
+              df -h /pvc
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "10Gi"
+            limits:
+              cpu: "4" # 6/5 = 1.2 exactly ✓
+              memory: "12Gi" # 12/10 = 1.2 exactly ✓
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc

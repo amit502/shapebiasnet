@@ -1046,6 +1046,7 @@
 # for name in runs:
 #     train_model(name)
 
+
 """
 train.py — Unified training script (CIFAR-10 / CIFAR-100 / ImageNet).
 
@@ -1338,8 +1339,9 @@ def train_model(name: str) -> float:
     # ── build model ──────────────────────────────────────────
     model = build_model(name, NUM_CLASSES, dataset=args.dataset).to(DEVICE)
 
-    # ── wrap with DataParallel if multiple GPUs available ────
-    if NUM_GPUS > 1:
+    # ── DataParallel disabled — causes NCCL hang on Nautilus multi-GPU nodes
+    # Use single GPU only (GPU 0)
+    if False and NUM_GPUS > 1:  # disabled
         print(f"  [DataParallel] Using {NUM_GPUS} GPUs")
         model = nn.DataParallel(model)
 

@@ -669,13 +669,13 @@ spec:
 
           resources:
             requests:
-              cpu: "2"
-              memory: "10Gi"
-              nvidia.com/gpu: "1"
+              cpu: "5"
+              memory: "20Gi"
+              nvidia.com/gpu: "2"
             limits:
-              cpu: "3" # 6/5 = 1.2 exactly ✓
-              memory: "12Gi" # 24/20 = 1.2 exactly ✓
-              nvidia.com/gpu: "1" # limits == requests ✓
+              cpu: "6" # 6/5 = 1.2 exactly ✓
+              memory: "24Gi" # 24/20 = 1.2 exactly ✓
+              nvidia.com/gpu: "2" # limits == requests ✓
 
           env:
             - name: GITHUB_PAT
@@ -683,8 +683,6 @@ spec:
                 secretKeyRef:
                   name: github-pat
                   key: token
-            - name: CUDA_VISIBLE_DEVICES
-              value: "0" # single GPU — avoids NCCL hang
             - name: PYTORCH_CUDA_ALLOC_CONF
               value: "expandable_segments:True"
 

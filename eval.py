@@ -1531,8 +1531,8 @@ def run(model_name: str, ckpt_path: str) -> dict:
     model.load_state_dict(state["model"] if "model" in state else state)
     model = model.to(DEVICE)
 
-    # Wrap with DataParallel if multiple GPUs available
-    if NUM_GPUS > 1:
+    # DataParallel disabled — causes NCCL hang on Nautilus
+    if False and NUM_GPUS > 1:  # disabled
         print(f"  [DataParallel] Using {NUM_GPUS} GPUs for eval")
         model = nn.DataParallel(model)
 

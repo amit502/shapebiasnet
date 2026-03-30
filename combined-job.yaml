@@ -45,7 +45,7 @@ spec:
                   - key: nvidia.com/gpu.product
                     operator: In
                     values:
-                      - NVIDIA-GeForce-RTX-3090
+                      # - NVIDIA-GeForce-RTX-3090
                       - NVIDIA-RTX-5000-Ada-Generation
 
       containers:
@@ -92,9 +92,9 @@ spec:
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
-                --epochs      90 \
-                --batch       256 \
-                --workers     4
+                --epochs      50 \
+                --batch       128 \
+                --workers     8
 
               # ── Step 3: Clean Evaluation ──────────────────────
               echo ""
@@ -107,8 +107,8 @@ spec:
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --results_dir /pvc/results \
-                --batch       256 \
-                --workers     4 \
+                --batch       128 \
+                --workers     8 \
                 --clean_only
 
               # ── Step 4: Corruption Evaluation ─────────────────
@@ -123,8 +123,8 @@ spec:
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --results_dir /pvc/results \
-                --batch       256 \
-                --workers     4 \
+                --batch       128 \
+                --workers     8 \
                 --corrupt_only || echo "  [WARN] Corrupt eval failed — ImageNet-100-C may not be ready."
 
               # ── Step 5: Efficiency Profiling ──────────────────

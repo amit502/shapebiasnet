@@ -404,5 +404,12 @@ def train_model(name: str) -> float:
 print(f"\n  Running {len(runs)} model(s): {runs}")
 print(f"  Dataset: {args.dataset}  |  Mode: {TRAIN_DESC}")
 
+# for name in runs:
+#     train_model(name)
+
 for name in runs:
     train_model(name)
+    # Release GPU memory between models
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()

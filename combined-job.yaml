@@ -29,7 +29,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: shape-resnet-pipeline
+  name: shape-resnet-pipeline-effnet
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -79,6 +79,9 @@ spec:
               # ── Create output dirs on PVC ─────────────────────
               mkdir -p /pvc/checkpoints /pvc/results
 
+              # Clear any leftover GPU memory from previous jobs
+              fuser -k /dev/nvidia* 2>/dev/null || true
+
               # ── Step 2: Train ─────────────────────────────────
               # ImageNet-100: 100 classes, ~128K images.
               # Much faster than full ImageNet — ~2-3 min/epoch on RTX 3090/5000.
@@ -88,12 +91,12 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --run_group   imagenet100_core \
+                --model       shape_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --epochs      50 \
-                --batch       128 \
+                --batch       64 \
                 --workers     8
 
               # ── Step 3: Clean Evaluation ──────────────────────
@@ -102,12 +105,12 @@ spec:
               echo "  Step 3: Clean Evaluation (ImageNet-100 val)"
               echo "=========================================="
               python -u eval.py \
-                --eval_group  imagenet100_core \
+                --model       shape_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --results_dir /pvc/results \
-                --batch       128 \
+                --batch       64 \
                 --workers     8 \
                 --clean_only
 
@@ -118,12 +121,12 @@ spec:
               echo "  Step 4: Corruption Evaluation (ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --eval_group  imagenet100_core \
+                --model       shape_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --results_dir /pvc/results \
-                --batch       128 \
+                --batch       64 \
                 --workers     8 \
                 --corrupt_only || echo "  [WARN] Corrupt eval failed — ImageNet-100-C may not be ready."
 

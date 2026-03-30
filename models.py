@@ -1048,10 +1048,15 @@ class RGBEfficientNet(nn.Module):
         assert size in nets, f"EfficientNet size must be one of {list(nets.keys())}"
         net, self.out_ch = nets[size]
         f = net.features
+        # self.stage1 = nn.Sequential(*f[0:3])   # stem + early blocks
+        # self.stage2 = nn.Sequential(*f[3:5])   # mid blocks
+        # self.stage3 = nn.Sequential(*f[5:7])   # deep blocks
+        # # f[7], f[8] excluded
+
         self.stage1 = nn.Sequential(*f[0:3])   # stem + early blocks
         self.stage2 = nn.Sequential(*f[3:5])   # mid blocks
-        self.stage3 = nn.Sequential(*f[5:7])   # deep blocks
-        # f[7], f[8] excluded
+        self.stage3 = nn.Sequential(*f[5:6])   # deep blocks → 112ch (B0) / 160ch (B4)
+        # f[6], f[7], f[8] excluded
 
     def forward(self, x: torch.Tensor):
         r1 = self.stage1(x)

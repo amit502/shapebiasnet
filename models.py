@@ -1139,7 +1139,7 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_shape = F.interpolate(x, size=(32, 32), mode="bilinear", align_corners=False) if x.shape[2] > 64 else x
+        x_shape = F.interpolate(x, size=(56, 56), mode="bilinear", align_corners=False) if x.shape[2] > 64 else x
         _, _, s3 = self.shape(x_shape)
         _, _, r3 = self.rgb(x)
         # align shape spatial size to RGB — works for any backbone/resolution

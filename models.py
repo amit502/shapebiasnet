@@ -694,7 +694,8 @@ class BaselineResNet18(nn.Module):
     """
     def __init__(self, num_classes: int = 10, dataset: str = "cifar10"):
         super().__init__()
-        net = resnet18(weights=None)
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
+        net = resnet18(weights=w)
         if "cifar" in dataset:
             net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             net.maxpool = nn.Identity()
@@ -713,7 +714,8 @@ class BaselineResNet50(nn.Module):
     """
     def __init__(self, num_classes: int = 10, dataset: str = "cifar10"):
         super().__init__()
-        net = resnet50(weights=None)
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
+        net = resnet50(weights=w)
         if "cifar" in dataset:
             net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             net.maxpool = nn.Identity()
@@ -732,7 +734,8 @@ class BaselineResNet34(nn.Module):
     def __init__(self, num_classes: int = 10, dataset: str = "cifar10"):
         super().__init__()
         from torchvision.models import resnet34
-        net = resnet34(weights=None)
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
+        net = resnet34(weights=w)
         if "cifar" in dataset:
             net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             net.maxpool = nn.Identity()
@@ -751,7 +754,8 @@ class BaselineResNet101(nn.Module):
     def __init__(self, num_classes: int = 10, dataset: str = "cifar10"):
         super().__init__()
         from torchvision.models import resnet101
-        net = resnet101(weights=None)
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
+        net = resnet101(weights=w)
         if "cifar" in dataset:
             net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             net.maxpool = nn.Identity()
@@ -773,7 +777,8 @@ class BaselineConvNeXt(nn.Module):
         from torchvision.models import convnext_tiny, convnext_base
         nets = {"tiny": convnext_tiny, "base": convnext_base}
         assert size in nets, f"ConvNeXt size must be one of {list(nets.keys())}"
-        self.model = nets[size](weights=None, num_classes=num_classes)
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
+        self.model = nets[size](weights=w, num_classes=num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -789,7 +794,8 @@ class BaselineEfficientNet(nn.Module):
         from torchvision.models import efficientnet_b0, efficientnet_b4
         nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
         assert size in nets, f"EfficientNet size must be one of {list(nets.keys())}"
-        self.model = nets[size](weights=None, num_classes=num_classes)
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
+        self.model = nets[size](weights=w, num_classes=num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -1001,9 +1007,10 @@ class RGBConvNeXt(nn.Module):
     def __init__(self, size: str = "tiny", dataset: str = "imagenet"):
         super().__init__()
         from torchvision.models import convnext_tiny, convnext_base
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
         nets = {
-            "tiny": (convnext_tiny(weights=None), [96,  192, 384]),
-            "base": (convnext_base(weights=None), [128, 256, 512]),
+            "tiny": (convnext_tiny(weights=w), [96,  192, 384]),
+            "base": (convnext_base(weights=w), [128, 256, 512]),
         }
         assert size in nets, f"ConvNeXt size must be one of {list(nets.keys())}"
         net, self.out_ch = nets[size]
@@ -1042,9 +1049,10 @@ class RGBEfficientNet(nn.Module):
     def __init__(self, size: str = "b0", dataset: str = "imagenet"):
         super().__init__()
         from torchvision.models import efficientnet_b0, efficientnet_b4
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
         nets = {
-            "b0": (efficientnet_b0(weights=None), [24,  40, 112]),
-            "b4": (efficientnet_b4(weights=None), [32,  56, 160]),
+            "b0": (efficientnet_b0(weights=w), [24,  40, 112]),
+            "b4": (efficientnet_b4(weights=w), [32,  56, 160]),
         }
         assert size in nets, f"EfficientNet size must be one of {list(nets.keys())}"
         net, self.out_ch = nets[size]

@@ -956,11 +956,12 @@ class RGBResNet(nn.Module):
     def __init__(self, depth: str = "18", dataset: str = "cifar10"):
         super().__init__()
         from torchvision.models import resnet34, resnet101
+        w = "IMAGENET1K_V1" if "imagenet" in dataset else None
         nets = {
-            "18":  resnet18(weights=None),
-            "34":  resnet34(weights=None),
-            "50":  resnet50(weights=None),
-            "101": resnet101(weights=None),
+            "18":  resnet18(weights=w),
+            "34":  resnet34(weights=w),
+            "50":  resnet50(weights=w),
+            "101": resnet101(weights=w),
         }
         assert depth in nets, f"ResNet depth must be one of {list(nets.keys())}"
         net = nets[depth]
@@ -1139,8 +1140,7 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_shape = F.interpolate(x, size=(56, 56), mode="bilinear", align_corners=False) if x.shape[2] > 64 else x
-        _, _, s3 = self.shape(x_shape)
+        _, _, s3 = self.shape(x)
         _, _, r3 = self.rgb(x)
         # align shape spatial size to RGB — works for any backbone/resolution
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)

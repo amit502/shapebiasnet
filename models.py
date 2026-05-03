@@ -1123,8 +1123,14 @@ class ShapeBiasNet(nn.Module):
         else:
             raise ValueError(f"Unknown rgb_type '{rgb_type}'")
 
-        # shape stream always outputs 256ch at s3
-        fusion_in_ch = rgb_out_ch + 256
+        # Project backbone to the same 256-dim space as the shape stream.
+        # fusion_in_ch is always 512 regardless of backbone depth or width.
+        self.rgb_proj = nn.Sequential(
+            nn.Conv2d(rgb_out_ch, 256, kernel_size=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+        )
+        fusion_in_ch = 512  # 256 (backbone) + 256 (shape), always
 
         self.fusion = nn.Sequential(
             nn.Conv2d(fusion_in_ch, 320, kernel_size=1),
@@ -1142,7 +1148,7 @@ class ShapeBiasNet(nn.Module):
         x_shape = F.interpolate(x, size=(32, 32), mode="bilinear", align_corners=False) if x.shape[2] > 64 else x
         _, _, s3 = self.shape(x_shape)
         _, _, r3 = self.rgb(x)
-        # align shape spatial size to RGB — works for any backbone/resolution
+        r3 = self.rgb_proj(r3)
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
 

@@ -184,17 +184,38 @@ STD  = {"cifar10":   (0.247,  0.243,  0.261),
 mean, std = MEAN[args.dataset], STD[args.dataset]
 
 
+class _DualAugMixTransform:
+    """Returns (augmix_tensor, clean_tensor) from one PIL image.
+    Used when --augmix is active for ShapeBiasNet: backbone sees AugMix,
+    shape stream sees clean so its edge responses are never corrupted.
+    """
+    def __init__(self, crop_flip, to_tensor_norm):
+        self.crop_flip      = crop_flip        # RandomResizedCrop + HFlip
+        self.augmix         = T.AugMix()
+        self.to_tensor_norm = to_tensor_norm   # ToTensor + Normalize
+
+    def __call__(self, img):
+        img = self.crop_flip(img)              # same spatial crop for both
+        augmix = self.to_tensor_norm(self.augmix(img))
+        clean  = self.to_tensor_norm(img)
+        return augmix, clean
+
+
+def _dual_collate(batch):
+    """Collate for _DualAugMixTransform: batch items are ((augmix, clean), label)."""
+    augmix  = torch.stack([b[0][0] for b in batch])
+    clean   = torch.stack([b[0][1] for b in batch])
+    labels  = torch.tensor([b[1] for b in batch])
+    return augmix, clean, labels
+
+
 def get_transforms():
     if args.augmix:
         if not IS_IMAGENET:
             raise ValueError("--augmix is only supported for ImageNet/ImageNet-100.")
-        train_tf = T.Compose([
-            T.RandomResizedCrop(224),
-            T.RandomHorizontalFlip(),
-            T.AugMix(),
-            T.ToTensor(),
-            T.Normalize(mean, std),
-        ])
+        crop_flip      = T.Compose([T.RandomResizedCrop(224), T.RandomHorizontalFlip()])
+        to_tensor_norm = T.Compose([T.ToTensor(), T.Normalize(mean, std)])
+        train_tf = _DualAugMixTransform(crop_flip, to_tensor_norm)
         val_tf = T.Compose([
             T.Resize(256), T.CenterCrop(224),
             T.ToTensor(), T.Normalize(mean, std),
@@ -264,7 +285,8 @@ else:
 
 trainloader = DataLoader(trainset, BATCH,   shuffle=True,
                          num_workers=WORKERS, pin_memory=True,
-                         persistent_workers=(WORKERS > 0))
+                         persistent_workers=(WORKERS > 0),
+                         collate_fn=_dual_collate if args.augmix else None)
 testloader  = DataLoader(testset,  BATCH*2, shuffle=False,
                          num_workers=WORKERS, pin_memory=True,
                          persistent_workers=(WORKERS > 0))
@@ -358,9 +380,16 @@ def train_model(name: str) -> float:
         model.train()
         loss_sum = 0.0
 
-        for step, (x, y) in enumerate(trainloader):
+        for step, batch in enumerate(trainloader):
+            if args.augmix:
+                x, x_clean, y = batch
+                x_clean = x_clean.to(DEVICE, non_blocking=True)
+            else:
+                x, y = batch
+                x_clean = None
             x, y  = x.to(DEVICE, non_blocking=True), y.to(DEVICE, non_blocking=True)
-            loss  = crit(model(x), y) / args.accum_steps
+            out   = model(x, x_clean) if (x_clean is not None and hasattr(unwrap(model), 'shape')) else model(x)
+            loss  = crit(out, y) / args.accum_steps
             loss.backward()
             loss_sum += loss.item() * args.accum_steps
 

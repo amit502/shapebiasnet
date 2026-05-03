@@ -1138,11 +1138,14 @@ class ShapeBiasNet(nn.Module):
             nn.Linear(256, num_classes),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_shape = F.interpolate(x, size=(32, 32), mode="bilinear", align_corners=False) if x.shape[2] > 64 else x
-        _, _, s3 = self.shape(x_shape)
+    def forward(self, x: torch.Tensor, x_clean: torch.Tensor = None) -> torch.Tensor:
+        # x_clean: original image before AugMix (passed during AugMix training only).
+        # Shape stream always sees the clean image so edge responses are never
+        # corrupted by augmentation — making shape and AugMix complementary.
+        x_for_shape = x_clean if x_clean is not None else x
+        x_for_shape = F.interpolate(x_for_shape, size=(32, 32), mode="bilinear", align_corners=False) if x_for_shape.shape[2] > 64 else x_for_shape
+        _, _, s3 = self.shape(x_for_shape)
         _, _, r3 = self.rgb(x)
-        # align shape spatial size to RGB — works for any backbone/resolution
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
 

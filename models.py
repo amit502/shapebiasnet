@@ -820,7 +820,7 @@ class OrientationBank(nn.Module):
         self.register_buffer("weight", torch.stack(kernels).unsqueeze(1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gray = x.mean(dim=1, keepdim=True)
+        gray = x.mean(dim=1, keepdim=True).clamp(0, 1)
         e    = F.conv2d(gray, self.weight, padding=1).abs()
         return e / (e.mean(dim=(2, 3), keepdim=True) + 1e-6)
 

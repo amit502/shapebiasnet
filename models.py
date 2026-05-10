@@ -851,37 +851,40 @@ class ShapeDiffusion(nn.Module):
 
 class ShapeEncoder(nn.Module):
     """
-    Hierarchical shape feature extractor. Identical for all datasets.
+    Hierarchical shape feature extractor — fully scalable.
 
-    Spatial resolutions:
-        CIFAR   (32×32)  : stage1=32×32, stage2=16×16, stage3=8×8
-        ImageNet(224×224): stage1=224×224, stage2=112×112, stage3=56×56
+    Scaling axes:
+      out_ch   : final-stage channel width; earlier stages scale as
+                 (out_ch//4, out_ch//2, out_ch). Set by ShapeBiasNet
+                 as rgb_out_ch // 4, so the shape stream is always
+                 proportional to the backbone width.
+      n_blocks : diffusion blocks per stage (b1, b2, b3). Deeper
+                 backbones receive more blocks to match their capacity.
 
-    F.interpolate in ShapeBiasNet.forward() aligns s3 to r3's spatial size
-    regardless of backbone — no extra stages needed for any backbone.
-
-    Output: always 256 channels at s3.
+    Spatial resolutions (set adaptively in ShapeBiasNet.forward):
+        CIFAR    (32×32 input) : 32×32 → 16×16 → 8×8
+        ImageNet (56×56 input) : 56×56 → 28×28 → 14×14
     """
-    def __init__(self):
+    def __init__(self, out_ch: int = 256, n_blocks: tuple = (2, 2, 1)):
         super().__init__()
-        self.edge = OrientationBank(out_ch=16)
+        c1, c2, c3 = max(16, out_ch // 4), max(32, out_ch // 2), out_ch
+        self.out_ch = c3
+        self.edge   = OrientationBank(out_ch=16)
 
         self.stage1 = nn.Sequential(
-            nn.Conv2d(16, 64, kernel_size=1),
-            nn.BatchNorm2d(64), nn.ReLU(),
-            ShapeDiffusion(64),
-            ShapeDiffusion(64),
+            nn.Conv2d(16, c1, kernel_size=1),
+            nn.BatchNorm2d(c1), nn.ReLU(),
+            *[ShapeDiffusion(c1) for _ in range(n_blocks[0])],
         )
         self.stage2 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128), nn.ReLU(),
-            ShapeDiffusion(128),
-            ShapeDiffusion(128),
+            nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(c2), nn.ReLU(),
+            *[ShapeDiffusion(c2) for _ in range(n_blocks[1])],
         )
         self.stage3 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256), nn.ReLU(),
-            ShapeDiffusion(256),
+            nn.Conv2d(c2, c3, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(c3), nn.ReLU(),
+            *[ShapeDiffusion(c3) for _ in range(n_blocks[2])],
         )
 
     def forward(self, x: torch.Tensor):
@@ -1104,8 +1107,6 @@ class ShapeBiasNet(nn.Module):
                  dataset: str     = "cifar10"):
         super().__init__()
 
-        self.shape = ShapeEncoder()
-
         if rgb_type == "custom":
             self.rgb   = RGBCustom()
             rgb_out_ch = 256
@@ -1113,23 +1114,39 @@ class ShapeBiasNet(nn.Module):
             self.rgb   = RGBResNet(depth=rgb_type, dataset=dataset)
             rgb_out_ch = self.rgb.out_ch[2]
         elif rgb_type.startswith("convnext"):
-            size       = rgb_type.split("_")[1]        # "tiny" or "base"
+            size       = rgb_type.split("_")[1]
             self.rgb   = RGBConvNeXt(size=size, dataset=dataset)
             rgb_out_ch = self.rgb.out_ch[2]
         elif rgb_type.startswith("effnet"):
-            size       = rgb_type.split("_")[1]        # "b0" or "b4"
+            size       = rgb_type.split("_")[1]
             self.rgb   = RGBEfficientNet(size=size, dataset=dataset)
             rgb_out_ch = self.rgb.out_ch[2]
         else:
             raise ValueError(f"Unknown rgb_type '{rgb_type}'")
 
-        # shape stream always outputs 256ch at s3
-        fusion_in_ch = rgb_out_ch + 256
+        # ── Shape encoder: width = rgb_out_ch // 4, min 64 ──────────────
+        # Depth (n_blocks) scales with backbone so deeper backbones get
+        # more diffusion capacity even when channel width is equal
+        # (e.g. ResNet-50 vs ResNet-101 both have 1024ch at layer3).
+        _NBLOCKS = {
+            "custom": (1, 1, 1),
+            "18":     (1, 2, 1),
+            "34":     (1, 2, 1),
+            "50":     (2, 2, 1),
+            "101":    (2, 2, 2),
+        }
+        n_blocks     = _NBLOCKS.get(rgb_type, (2, 2, 1))
+        shape_out_ch = max(64, rgb_out_ch // 4)
+        self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
+
+        # ── Fusion head: bottleneck scales with combined input size ───────
+        fusion_in_ch  = rgb_out_ch + shape_out_ch
+        fusion_mid_ch = max(128, fusion_in_ch // 4)
 
         self.fusion = nn.Sequential(
-            nn.Conv2d(fusion_in_ch, 320, kernel_size=1),
-            nn.BatchNorm2d(320), nn.ReLU(),
-            nn.Conv2d(320, 256, kernel_size=3, padding=1),
+            nn.Conv2d(fusion_in_ch, fusion_mid_ch, kernel_size=1),
+            nn.BatchNorm2d(fusion_mid_ch), nn.ReLU(),
+            nn.Conv2d(fusion_mid_ch, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256), nn.ReLU(),
         )
         self.head = nn.Sequential(
@@ -1139,10 +1156,14 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_shape = F.interpolate(x, size=(32, 32), mode="bilinear", align_corners=False) if x.shape[2] > 64 else x
-        _, _, s3 = self.shape(x_shape)
         _, _, r3 = self.rgb(x)
-        # align shape spatial size to RGB — works for any backbone/resolution
+        # adaptive shape resolution: 4x the feature map spatial size.
+        # CIFAR  (r3=8x8)  → target=32  — input already 32x32, no-op.
+        # ImageNet (r3=14x14) → target=56 — better detail than hardcoded 32.
+        target = r3.shape[2] * 4
+        x_shape = F.interpolate(x, size=(target, target), mode="bilinear",
+                                align_corners=False) if x.shape[2] != target else x
+        _, _, s3 = self.shape(x_shape)
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
 

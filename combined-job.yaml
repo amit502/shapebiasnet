@@ -59,11 +59,11 @@ spec:
 
               # ── Step 0: Clone repo ────────────────────────────
               echo "=========================================="
-              echo "  Step 0: Cloning repo (branch: review)"
+              echo "  Step 0: Cloning repo (branch: scale)"
               echo "=========================================="
               apt-get update -qq && apt-get install -y -qq git
               git clone \
-                --branch review \
+                --branch scale \
                 --single-branch \
                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
                 /shapebiasnet

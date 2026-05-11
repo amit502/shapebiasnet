@@ -1135,8 +1135,15 @@ class ShapeBiasNet(nn.Module):
             "50":     (2, 2, 1),
             "101":    (2, 2, 1),
         }
+        _SHAPE_CH = {
+            "custom": 256,
+            "18":     256,
+            "34":     256,
+            "50":     256,
+            "101":    512,
+        }
         n_blocks     = _NBLOCKS.get(rgb_type, (2, 2, 1))
-        shape_out_ch = max(64, rgb_out_ch // 4)
+        shape_out_ch = _SHAPE_CH.get(rgb_type, max(64, rgb_out_ch // 4))
         self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
 
         # ── Fusion head: bottleneck scales with combined input size ───────

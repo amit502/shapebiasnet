@@ -1133,7 +1133,7 @@ class ShapeBiasNet(nn.Module):
             "18":     (1, 2, 1),
             "34":     (1, 2, 1),
             "50":     (2, 2, 1),
-            "101":    (2, 2, 2),
+            "101":    (2, 2, 1),
         }
         n_blocks     = _NBLOCKS.get(rgb_type, (2, 2, 1))
         shape_out_ch = max(64, rgb_out_ch // 4)

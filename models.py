@@ -939,11 +939,17 @@ class RGBCustom(nn.Module):
             nn.Conv2d(256, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU())
         self.out_ch = [64, 128, 256]
 
-    def forward(self, x: torch.Tensor):
+    def forward_until_l2(self, x: torch.Tensor):
         r1 = self.stage1(x)
         r2 = self.stage2(r1)
-        r3 = self.stage3(r2)
-        return r1, r2, r3
+        return r1, r2
+
+    def run_l3(self, r2: torch.Tensor) -> torch.Tensor:
+        return self.stage3(r2)
+
+    def forward(self, x: torch.Tensor):
+        r1, r2 = self.forward_until_l2(x)
+        return r1, r2, self.run_l3(r2)
 
 
 class RGBResNet(nn.Module):
@@ -977,11 +983,17 @@ class RGBResNet(nn.Module):
         self.l1, self.l2, self.l3 = net.layer1, net.layer2, net.layer3
         self.out_ch = [64, 128, 256] if depth in ("18", "34") else [256, 512, 1024]
 
-    def forward(self, x: torch.Tensor):
+    def forward_until_l2(self, x: torch.Tensor):
         r1 = self.l1(self.stem(x))
         r2 = self.l2(r1)
-        r3 = self.l3(r2)
-        return r1, r2, r3
+        return r1, r2
+
+    def run_l3(self, r2: torch.Tensor) -> torch.Tensor:
+        return self.l3(r2)
+
+    def forward(self, x: torch.Tensor):
+        r1, r2 = self.forward_until_l2(x)
+        return r1, r2, self.run_l3(r2)
 
 
 class RGBConvNeXt(nn.Module):
@@ -1018,11 +1030,17 @@ class RGBConvNeXt(nn.Module):
         self.stage3 = f[5]
         # f[6], f[7] (downsample + stage4) excluded
 
-    def forward(self, x: torch.Tensor):
+    def forward_until_l2(self, x: torch.Tensor):
         r1 = self.stage1(self.stem(x))
         r2 = self.stage2(self.down1(r1))
-        r3 = self.stage3(self.down2(r2))
-        return r1, r2, r3
+        return r1, r2
+
+    def run_l3(self, r2: torch.Tensor) -> torch.Tensor:
+        return self.stage3(self.down2(r2))
+
+    def forward(self, x: torch.Tensor):
+        r1, r2 = self.forward_until_l2(x)
+        return r1, r2, self.run_l3(r2)
 
 
 class RGBEfficientNet(nn.Module):
@@ -1061,11 +1079,17 @@ class RGBEfficientNet(nn.Module):
         self.stage3 = nn.Sequential(*f[5:6])   # deep blocks → 112ch (B0) / 160ch (B4)
         # f[6], f[7], f[8] excluded
 
-    def forward(self, x: torch.Tensor):
+    def forward_until_l2(self, x: torch.Tensor):
         r1 = self.stage1(x)
         r2 = self.stage2(r1)
-        r3 = self.stage3(r2)
-        return r1, r2, r3
+        return r1, r2
+
+    def run_l3(self, r2: torch.Tensor) -> torch.Tensor:
+        return self.stage3(r2)
+
+    def forward(self, x: torch.Tensor):
+        r1, r2 = self.forward_until_l2(x)
+        return r1, r2, self.run_l3(r2)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1140,16 +1164,26 @@ class ShapeBiasNet(nn.Module):
             "18":     256,
             "34":     256,
             "50":     256,
-            "101":    512,
+            "101":    256,
         }
         n_blocks     = _NBLOCKS.get(rgb_type, (2, 2, 1))
         shape_out_ch = _SHAPE_CH.get(rgb_type, max(64, rgb_out_ch // 4))
         self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
 
-        # ── Fusion head: bottleneck scales with combined input size ───────
+        # ── Shape injection: project s2 into r2 before layer3 ────────────
+        # s2 channels = max(32, shape_out_ch // 2) from ShapeEncoder stage2
+        s2_ch = max(32, shape_out_ch // 2)
+        r2_ch = self.rgb.out_ch[1]
+        self.shape_inject = nn.Sequential(
+            nn.Conv2d(s2_ch, r2_ch, kernel_size=1),
+            nn.BatchNorm2d(r2_ch),
+        )
+        # zero-init BN weight so injection starts as a no-op
+        nn.init.zeros_(self.shape_inject[1].weight)
+
+        # ── Fusion head: concat r3 + s3 then project ─────────────────────
         fusion_in_ch  = rgb_out_ch + shape_out_ch
         fusion_mid_ch = max(128, fusion_in_ch // 4)
-
         self.fusion = nn.Sequential(
             nn.Conv2d(fusion_in_ch, fusion_mid_ch, kernel_size=1),
             nn.BatchNorm2d(fusion_mid_ch), nn.ReLU(),
@@ -1163,14 +1197,13 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, _, r3 = self.rgb(x)
-        # adaptive shape resolution: 4x the feature map spatial size.
-        # CIFAR  (r3=8x8)  → target=32  — input already 32x32, no-op.
-        # ImageNet (r3=14x14) → target=56 — better detail than hardcoded 32.
-        target = r3.shape[2] * 4
-        x_shape = F.interpolate(x, size=(target, target), mode="bilinear",
-                                align_corners=False) if x.shape[2] != target else x
-        _, _, s3 = self.shape(x_shape)
+        x_shape = F.interpolate(x, size=(32, 32), mode="bilinear",
+                                align_corners=False) if x.shape[2] != 32 else x
+        _, s2, s3 = self.shape(x_shape)
+        _, r2     = self.rgb.forward_until_l2(x)
+        s2 = F.interpolate(s2, size=r2.shape[2:], mode="bilinear", align_corners=False)
+        r2 = r2 + self.shape_inject(s2)
+        r3 = self.rgb.run_l3(r2)
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
 

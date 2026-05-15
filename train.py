@@ -340,12 +340,17 @@ def train_model(name: str) -> float:
     if os.path.exists(ckpt_path):
         print(f"  [Resume] Found checkpoint: {ckpt_path}")
         state = torch.load(ckpt_path, map_location="cpu")
-        unwrap(model).load_state_dict(state["model"])
-        opt.load_state_dict(state["opt"])
-        sch.load_state_dict(state["sch"])
-        start_ep = state["epoch"] + 1
-        best_acc = state.get("best_acc", 0.0)
-        print(f"  [Resume] Continuing from epoch {start_ep}, best={best_acc:.2f}%")
+        missing, unexpected = unwrap(model).load_state_dict(state["model"], strict=False)
+        if missing or unexpected:
+            print(f"  [Resume] Architecture mismatch — starting fresh.")
+            print(f"    Missing : {missing}")
+            print(f"    Unexpected: {unexpected}")
+        else:
+            opt.load_state_dict(state["opt"])
+            sch.load_state_dict(state["sch"])
+            start_ep = state["epoch"] + 1
+            best_acc = state.get("best_acc", 0.0)
+            print(f"  [Resume] Continuing from epoch {start_ep}, best={best_acc:.2f}%")
 
     if start_ep > EPOCHS:
         print("  Already completed. Skipping.")

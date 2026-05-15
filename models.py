@@ -1170,16 +1170,15 @@ class ShapeBiasNet(nn.Module):
         shape_out_ch = _SHAPE_CH.get(rgb_type, max(64, rgb_out_ch // 4))
         self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
 
-        # ── Shape injection: project s2 into r2 before layer3 ────────────
-        # s2 channels = max(32, shape_out_ch // 2) from ShapeEncoder stage2
+        # ── Early fusion: concat s2 with r2, project back to r2_ch ──────
+        # All of layer3 then processes the shape-informed features.
         s2_ch = max(32, shape_out_ch // 2)
         r2_ch = self.rgb.out_ch[1]
-        self.shape_inject = nn.Sequential(
-            nn.Conv2d(s2_ch, r2_ch, kernel_size=1),
+        self.shape_fuse_l2 = nn.Sequential(
+            nn.Conv2d(s2_ch + r2_ch, r2_ch, kernel_size=1),
             nn.BatchNorm2d(r2_ch),
+            nn.ReLU(),
         )
-        # zero-init BN weight so injection starts as a no-op
-        nn.init.zeros_(self.shape_inject[1].weight)
 
         # ── Fusion head: concat r3 + s3 then project ─────────────────────
         fusion_in_ch  = rgb_out_ch + shape_out_ch
@@ -1202,7 +1201,7 @@ class ShapeBiasNet(nn.Module):
         _, s2, s3 = self.shape(x_shape)
         _, r2     = self.rgb.forward_until_l2(x)
         s2 = F.interpolate(s2, size=r2.shape[2:], mode="bilinear", align_corners=False)
-        r2 = r2 + self.shape_inject(s2)
+        r2 = self.shape_fuse_l2(torch.cat([r2, s2], dim=1))
         r3 = self.rgb.run_l3(r2)
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))

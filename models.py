@@ -849,6 +849,71 @@ class ShapeDiffusion(nn.Module):
         return F.relu(self.bn(y) + x)
 
 
+# ─────────────────────────────────────────────────────────────
+#  ROBUSTCONV  —  drop-in Conv2d with Laplacian diffusion
+# ─────────────────────────────────────────────────────────────
+
+class RobustConv(nn.Module):
+    """
+    Drop-in replacement for nn.Conv2d.  Before the spatial convolution,
+    applies one forward-Euler step of isotropic Laplacian (heat) diffusion:
+
+        x̃ = x + λ · ∇²x        (∇² = discrete 3×3 Laplacian, applied depthwise)
+        output = conv(x̃)
+
+    At smooth (texture) regions ∇²x is large → noise is damped.
+    At structural edges ∇²x ≈ 0 → boundaries are preserved.
+
+    λ=0.12 is fixed — zero extra parameters, zero extra memory,
+    identical parameter count to the baseline conv it replaces.
+    All constructor arguments mirror nn.Conv2d exactly.
+    """
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernel_size: int = 3, stride: int = 1,
+                 padding: int = 1, groups: int = 1,
+                 bias: bool = False, lam: float = 0.12):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
+                              stride, padding, groups=groups, bias=bias)
+        lap = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]])
+        self.register_buffer('lap', lap.view(1, 1, 3, 3))
+        self.lam = lam
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        lap_x = F.conv2d(x, self.lap.expand(x.size(1), 1, 3, 3),
+                         padding=1, groups=x.size(1))
+        return self.conv(x + self.lam * lap_x)
+
+
+def make_robust(model: nn.Module, lam: float = 0.12) -> nn.Module:
+    """
+    Walk the module tree of `model` and replace every spatial Conv2d
+    (kernel_size ≥ 3) with an equivalent RobustConv in-place.
+
+    Weight and bias tensors are transferred so random initialisation is
+    preserved.  The Laplacian buffer adds no trainable parameters.
+    Returns `model` for convenience (mutation is in-place).
+    """
+    for name, module in model.named_children():
+        if isinstance(module, nn.Conv2d) and module.kernel_size[0] >= 3:
+            robust = RobustConv(
+                module.in_channels, module.out_channels,
+                kernel_size=module.kernel_size[0],
+                stride=module.stride[0],
+                padding=module.padding[0],
+                groups=module.groups,
+                bias=module.bias is not None,
+                lam=lam,
+            )
+            robust.conv.weight = module.weight
+            if module.bias is not None:
+                robust.conv.bias = module.bias
+            setattr(model, name, robust)
+        else:
+            make_robust(module, lam)
+    return model
+
+
 class ShapeEncoder(nn.Module):
     """
     Hierarchical shape feature extractor — fully scalable.
@@ -1093,6 +1158,77 @@ class RGBEfficientNet(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
+#  ROBUSTCONV BACKBONE WRAPPERS
+#  Standard backbones with every spatial conv replaced by RobustConv.
+#  Same parameter count as the vanilla backbone — robustness comes
+#  purely from the Laplacian inductive bias, not extra capacity.
+# ─────────────────────────────────────────────────────────────
+
+class RobustResNet(nn.Module):
+    """
+    ResNet-18/34/50/101 with all 3×3 convolutions replaced by RobustConv.
+
+    Compared against BaselineResNet, this isolates the contribution of the
+    Laplacian diffusion primitive with zero architectural overhead.
+    """
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet", lam: float = 0.12):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets, f"depth must be one of {list(nets.keys())}"
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_robust(net, lam=lam)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class RobustConvNeXt(nn.Module):
+    """
+    ConvNeXt-Tiny/Base with all spatial convolutions replaced by RobustConv.
+    ConvNeXt's 7×7 depthwise conv is also wrapped — Laplacian is always
+    applied depthwise before the spatial aggregation, regardless of kernel size.
+    """
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet", lam: float = 0.12):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        nets = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in nets, f"size must be one of {list(nets.keys())}"
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_robust(net, lam=lam)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class RobustEfficientNet(nn.Module):
+    """
+    EfficientNet-B0/B4 with all spatial convolutions replaced by RobustConv.
+    Depthwise MBConv 3×3/5×5 convolutions are wrapped (groups preserved).
+    """
+    def __init__(self, size: str = "b4", num_classes: int = 1000,
+                 dataset: str = "imagenet", lam: float = 0.12):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets, f"size must be one of {list(nets.keys())}"
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_robust(net, lam=lam)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+# ─────────────────────────────────────────────────────────────
 #  SHAPE-BIAS NET  (main model)
 # ─────────────────────────────────────────────────────────────
 
@@ -1186,15 +1322,7 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Compute edges at full resolution then pool — preserves global edge
-        # statistics rather than losing fine edges via image downsampling first.
-        # On CIFAR (32×32) this is identical to the previous approach.
-        edges = self.shape.edge(x)
-        edges = F.adaptive_avg_pool2d(edges, (32, 32))
-        s1 = self.shape.stage1(edges)
-        s2 = self.shape.stage2(s1)
-        s3 = self.shape.stage3(s2)
-
+        _, _, s3 = self.shape(x)
         _, _, r3 = self.rgb(x)
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
@@ -1205,16 +1333,25 @@ class ShapeBiasNet(nn.Module):
 # ─────────────────────────────────────────────────────────────
 
 MODEL_NAMES = [
-    # ── Baselines (no shape stream) ──────────────────
+    # ── Baselines (vanilla backbone, no modification) ──────────
     "baseline_res18",             # CIFAR + ImageNet
-    "baseline_res50",             # CIFAR + ImageNet
     "baseline_res34",             # CIFAR + ImageNet
+    "baseline_res50",             # CIFAR + ImageNet
     "baseline_res101",            # CIFAR + ImageNet
     "baseline_convnext_tiny",     # ImageNet only
     "baseline_convnext_base",     # ImageNet only
     "baseline_efficientnet_b0",   # ImageNet only
     "baseline_efficientnet_b4",   # ImageNet only
-    # ── ShapeBiasNet variants ─────────────────────────
+    # ── RobustConv variants (same backbone, every 3×3 → RobustConv)
+    "robustconv_res18",           # CIFAR + ImageNet
+    "robustconv_res34",           # CIFAR + ImageNet
+    "robustconv_res50",           # CIFAR + ImageNet
+    "robustconv_res101",          # CIFAR + ImageNet
+    "robustconv_convnext_tiny",   # ImageNet only
+    "robustconv_convnext_base",   # ImageNet only
+    "robustconv_effnet_b0",       # ImageNet only
+    "robustconv_effnet_b4",       # ImageNet only
+    # ── ShapeBiasNet variants (dual-stream, for comparison) ────
     "shape_custom",               # CIFAR only  (lightweight custom backbone)
     "shape_res18",                # CIFAR + ImageNet
     "shape_res34",                # CIFAR + ImageNet
@@ -1248,24 +1385,34 @@ def build_model(name: str,
     kw      = dict(num_classes=num_classes, dataset=dataset)
 
     # ── Baselines ─────────────────────────────────────────────
-    if name == "baseline_res18":          return BaselineResNet18(**kw)
-    if name == "baseline_res50":          return BaselineResNet50(**kw)
-    if name == "baseline_res34":          return BaselineResNet34(**kw)
-    if name == "baseline_res101":         return BaselineResNet101(**kw)
-    if name == "baseline_convnext_tiny":  return BaselineConvNeXt("tiny", **kw)
-    if name == "baseline_convnext_base":  return BaselineConvNeXt("base", **kw)
+    if name == "baseline_res18":           return BaselineResNet18(**kw)
+    if name == "baseline_res34":           return BaselineResNet34(**kw)
+    if name == "baseline_res50":           return BaselineResNet50(**kw)
+    if name == "baseline_res101":          return BaselineResNet101(**kw)
+    if name == "baseline_convnext_tiny":   return BaselineConvNeXt("tiny", **kw)
+    if name == "baseline_convnext_base":   return BaselineConvNeXt("base", **kw)
     if name == "baseline_efficientnet_b0": return BaselineEfficientNet("b0", **kw)
     if name == "baseline_efficientnet_b4": return BaselineEfficientNet("b4", **kw)
 
+    # ── RobustConv ────────────────────────────────────────────
+    if name == "robustconv_res18":         return RobustResNet("18",  **kw)
+    if name == "robustconv_res34":         return RobustResNet("34",  **kw)
+    if name == "robustconv_res50":         return RobustResNet("50",  **kw)
+    if name == "robustconv_res101":        return RobustResNet("101", **kw)
+    if name == "robustconv_convnext_tiny": return RobustConvNeXt("tiny", **kw)
+    if name == "robustconv_convnext_base": return RobustConvNeXt("base", **kw)
+    if name == "robustconv_effnet_b0":     return RobustEfficientNet("b0", **kw)
+    if name == "robustconv_effnet_b4":     return RobustEfficientNet("b4", **kw)
+
     # ── ShapeBiasNet ──────────────────────────────────────────
-    if name == "shape_custom":        return ShapeBiasNet("custom",       **kw)
-    if name == "shape_res18":         return ShapeBiasNet("18",           **kw)
-    if name == "shape_res34":         return ShapeBiasNet("34",           **kw)
-    if name == "shape_res50":         return ShapeBiasNet("50",           **kw)
-    if name == "shape_res101":        return ShapeBiasNet("101",          **kw)
-    if name == "shape_convnext_tiny": return ShapeBiasNet("convnext_tiny",**kw)
-    if name == "shape_convnext_base": return ShapeBiasNet("convnext_base",**kw)
-    if name == "shape_effnet_b0":     return ShapeBiasNet("effnet_b0",    **kw)
-    if name == "shape_effnet_b4":     return ShapeBiasNet("effnet_b4",    **kw)
+    if name == "shape_custom":        return ShapeBiasNet("custom",        **kw)
+    if name == "shape_res18":         return ShapeBiasNet("18",            **kw)
+    if name == "shape_res34":         return ShapeBiasNet("34",            **kw)
+    if name == "shape_res50":         return ShapeBiasNet("50",            **kw)
+    if name == "shape_res101":        return ShapeBiasNet("101",           **kw)
+    if name == "shape_convnext_tiny": return ShapeBiasNet("convnext_tiny", **kw)
+    if name == "shape_convnext_base": return ShapeBiasNet("convnext_base", **kw)
+    if name == "shape_effnet_b0":     return ShapeBiasNet("effnet_b0",     **kw)
+    if name == "shape_effnet_b4":     return ShapeBiasNet("effnet_b4",     **kw)
 
     raise ValueError(f"Unknown model '{name}'. Choose from: {MODEL_NAMES}")

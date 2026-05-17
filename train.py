@@ -94,6 +94,22 @@ GROUPS = {
                             "baseline_res101",           "shape_res101",
                             "baseline_convnext_tiny",    "shape_convnext_tiny",
                             "baseline_efficientnet_b4",  "shape_effnet_b4"],
+    # RobustConv rounds — baseline vs robust, no shape stream
+    "robustconv_res50":    ["baseline_res50",            "robustconv_res50"],
+    "robustconv_res101":   ["baseline_res101",           "robustconv_res101"],
+    "robustconv_convnext": ["baseline_convnext_tiny",    "robustconv_convnext_tiny"],
+    "robustconv_effnet":   ["baseline_efficientnet_b4",  "robustconv_effnet_b4"],
+    "robustconv_all":      ["baseline_res50",            "robustconv_res50",
+                            "baseline_res101",           "robustconv_res101",
+                            "baseline_convnext_tiny",    "robustconv_convnext_tiny",
+                            "baseline_efficientnet_b4",  "robustconv_effnet_b4"],
+    # Three-way comparison on ImageNet-100: baseline vs RobustConv vs ShapeBiasNet
+    "compare_res50":       ["baseline_res50",  "robustconv_res50",  "shape_res50"],
+    "compare_res101":      ["baseline_res101", "robustconv_res101", "shape_res101"],
+    "compare_all":         ["baseline_res50",   "robustconv_res50",  "shape_res50",
+                            "baseline_res101",  "robustconv_res101", "shape_res101",
+                            "baseline_convnext_tiny",   "robustconv_convnext_tiny",
+                            "baseline_efficientnet_b4", "robustconv_effnet_b4"],
 }
 
 # ──────────────────────────────────────────────────────────────

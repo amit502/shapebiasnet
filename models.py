@@ -1170,17 +1170,7 @@ class ShapeBiasNet(nn.Module):
         shape_out_ch = _SHAPE_CH.get(rgb_type, max(64, rgb_out_ch // 4))
         self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
 
-        # ── Early fusion: concat s2 with r2, project back to r2_ch ──────
-        # All of layer3 then processes the shape-informed features.
-        s2_ch = max(32, shape_out_ch // 2)
-        r2_ch = self.rgb.out_ch[1]
-        self.shape_fuse_l2 = nn.Sequential(
-            nn.Conv2d(s2_ch + r2_ch, r2_ch, kernel_size=1),
-            nn.BatchNorm2d(r2_ch),
-            nn.ReLU(),
-        )
-
-        # ── Fusion head: concat r3 + s3 then project ─────────────────────
+        # ── Fusion head: late concat r3 + s3 ─────────────────────────────
         fusion_in_ch  = rgb_out_ch + shape_out_ch
         fusion_mid_ch = max(128, fusion_in_ch // 4)
         self.fusion = nn.Sequential(
@@ -1196,13 +1186,16 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_shape = F.interpolate(x, size=(32, 32), mode="bilinear",
-                                align_corners=False) if x.shape[2] != 32 else x
-        _, s2, s3 = self.shape(x_shape)
-        _, r2     = self.rgb.forward_until_l2(x)
-        s2 = F.interpolate(s2, size=r2.shape[2:], mode="bilinear", align_corners=False)
-        r2 = self.shape_fuse_l2(torch.cat([r2, s2], dim=1))
-        r3 = self.rgb.run_l3(r2)
+        # Compute edges at full resolution then pool — preserves global edge
+        # statistics rather than losing fine edges via image downsampling first.
+        # On CIFAR (32×32) this is identical to the previous approach.
+        edges = self.shape.edge(x)
+        edges = F.adaptive_avg_pool2d(edges, (32, 32))
+        s1 = self.shape.stage1(edges)
+        s2 = self.shape.stage2(s1)
+        s3 = self.shape.stage3(s2)
+
+        _, _, r3 = self.rgb(x)
         s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
 

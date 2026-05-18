@@ -11,12 +11,12 @@
 #     baseline_convnext_tiny / baseline_convnext_base
 #     baseline_efficientnet_b0 / baseline_efficientnet_b4
 #
-#   PMCONV  ★ main contribution — Perona-Malik anisotropic diffusion Conv
-#     Every spatial conv preceded by n_steps=2 of PM diffusion.
-#     Edge-preserving, data-dependent, nonlinear. Zero extra parameters.
-#     pmconv_res18 / pmconv_res34 / pmconv_res50 / pmconv_res101
-#     pmconv_convnext_tiny / pmconv_convnext_base
-#     pmconv_effnet_b0 / pmconv_effnet_b4
+#   PMCONV-L  ★ main contribution — PM anisotropic diffusion, Lorentzian, n_steps=1
+#     Lorentzian conductance (no exp), 1 step per conv. ~1.13x overhead vs baseline.
+#     pmconv_l_res18 / pmconv_l_res34 / pmconv_l_res50 / pmconv_l_res101
+#     pmconv_l_convnext_tiny / pmconv_l_convnext_base
+#     pmconv_l_effnet_b0 / pmconv_l_effnet_b4
+#     (scale branch has pmconv_* with Leclerc exp + n_steps=2 for ablation)
 #
 #   ROBUSTCONV  (ablation — isotropic Laplacian diffusion Conv):
 #     Same as PMConv but isotropic — blurs edges, network can compensate.
@@ -31,16 +31,16 @@
 #
 # ── Run groups ───────────────────────────────────────────────────────────
 #
-#   PMConv (main — baselines already done, only pmconv needs training):
-#     pmconv_res50     : baseline_res50    + pmconv_res50
-#     pmconv_res101    : baseline_res101   + pmconv_res101
-#     pmconv_convnext  : baseline_convnext_tiny + pmconv_convnext_tiny
-#     pmconv_effnet    : baseline_efficientnet_b4 + pmconv_effnet_b4
-#     pmconv_all       : all four backbone pairs
+#   PMConv-L (this branch — Lorentzian, n_steps=1, ~1.13x overhead):
+#     pmconv_l_res50     : baseline_res50    + pmconv_l_res50
+#     pmconv_l_res101    : baseline_res101   + pmconv_l_res101
+#     pmconv_l_convnext  : baseline_convnext_tiny + pmconv_l_convnext_tiny
+#     pmconv_l_effnet    : baseline_efficientnet_b4 + pmconv_l_effnet_b4
+#     pmconv_l_all       : all four backbone pairs
 #
-#   Ablation (four-way: baseline / isotropic / anisotropic / dual-stream):
-#     ablation_res50   : baseline + robustconv + pmconv + shape  (res50)
-#     ablation_res101  : baseline + robustconv + pmconv + shape  (res101)
+#   Ablation (four-way: baseline / isotropic / anisotropic-L / dual-stream):
+#     ablation_res50   : baseline + robustconv + pmconv_l + shape  (res50)
+#     ablation_res101  : baseline + robustconv + pmconv_l + shape  (res101)
 #
 #   RobustConv (isotropic ablation only):
 #     robustconv_res50 / robustconv_res101 / robustconv_all
@@ -64,7 +64,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: pmconv-res101-img
+  name: pmconv-l-res101-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -126,7 +126,7 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       pmconv_res101 \
+                --model       pmconv_l_res101 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -140,7 +140,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       pmconv_res101 \
+                --model       pmconv_l_res101 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

@@ -850,23 +850,17 @@ class ShapeDiffusion(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
-#  ROBUSTCONV  —  drop-in Conv2d with Laplacian diffusion
+#  ROBUSTCONV  —  drop-in Conv2d with isotropic Laplacian diffusion
+#  (ablation baseline; see PMDiffusionConv below for the full version)
 # ─────────────────────────────────────────────────────────────
 
 class RobustConv(nn.Module):
     """
-    Drop-in replacement for nn.Conv2d.  Before the spatial convolution,
-    applies one forward-Euler step of isotropic Laplacian (heat) diffusion:
+    Drop-in Conv2d with one step of isotropic Laplacian (heat) diffusion.
+    Kept as ablation baseline to compare against anisotropic PMDiffusionConv.
 
-        x̃ = x + λ · ∇²x        (∇² = discrete 3×3 Laplacian, applied depthwise)
-        output = conv(x̃)
-
-    At smooth (texture) regions ∇²x is large → noise is damped.
-    At structural edges ∇²x ≈ 0 → boundaries are preserved.
-
-    λ=0.12 is fixed — zero extra parameters, zero extra memory,
-    identical parameter count to the baseline conv it replaces.
-    All constructor arguments mirror nn.Conv2d exactly.
+    Limitation: isotropic — smooths edges as well as noise. The network can
+    partially compensate during training via linear weight adjustment.
     """
     def __init__(self, in_channels: int, out_channels: int,
                  kernel_size: int = 3, stride: int = 1,
@@ -885,33 +879,102 @@ class RobustConv(nn.Module):
         return self.conv(x + self.lam * lap_x)
 
 
-def make_robust(model: nn.Module, lam: float = 0.12) -> nn.Module:
-    """
-    Walk the module tree of `model` and replace every spatial Conv2d
-    (kernel_size ≥ 3) with an equivalent RobustConv in-place.
+# ─────────────────────────────────────────────────────────────
+#  PMDIFFUSIONCONV  —  Perona-Malik anisotropic diffusion Conv
+# ─────────────────────────────────────────────────────────────
 
-    Weight and bias tensors are transferred so random initialisation is
-    preserved.  The Laplacian buffer adds no trainable parameters.
-    Returns `model` for convenience (mutation is in-place).
+class PMDiffusionConv(nn.Module):
     """
+    Drop-in Conv2d replacement with Perona-Malik anisotropic diffusion.
+
+    Before every spatial convolution, applies n_steps of discrete PM diffusion:
+
+        For each direction d ∈ {N, S, E, W}:
+            ∇_d x  = x[neighbor_d] − x               (directional difference)
+            c_d    = exp( −(∇_d x / k)² )             (Leclerc conductance)
+        x ← x + λ · Σ_d  c_d · ∇_d x
+
+    Conductance behaviour:
+        flat region  (|∇_d x| ≪ k)  →  c_d ≈ 1  →  full diffusion  → noise removed
+        edge region  (|∇_d x| ≫ k)  →  c_d ≈ 0  →  no diffusion    → edge preserved
+
+    Critical differences from isotropic Laplacian (RobustConv):
+        • Data-dependent: conductance is computed from the actual input gradient,
+          not a fixed kernel — the network cannot undo it with linear weights.
+        • Truly edge-preserving: boundaries carry zero diffusion flux by design.
+        • Nonlinear: the exp conductance cannot be absorbed into the subsequent
+          conv's weight matrix, making the bias structurally permanent.
+
+    Hyperparameters (fixed, zero learnable parameters added):
+        k       : conductance threshold.  |∇| < k → diffuse;  |∇| > k → preserve.
+                  Default 0.3 for BN-normalised features (std ≈ 1).
+        lam     : step size.  Must satisfy lam ≤ 0.25 for PDE stability.
+        n_steps : diffusion iterations before the conv.  2 balances noise
+                  removal with compute cost.
+    """
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernel_size: int = 3, stride: int = 1,
+                 padding: int = 1, groups: int = 1,
+                 bias: bool = False,
+                 n_steps: int = 2, lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        self.conv   = nn.Conv2d(in_channels, out_channels, kernel_size,
+                                stride, padding, groups=groups, bias=bias)
+        self.n_steps = n_steps
+        self.lam     = lam
+        self.k       = k
+
+    def _pm_step(self, x: torch.Tensor) -> torch.Tensor:
+        xp = F.pad(x, (1, 1, 1, 1), mode='reflect')
+        dn = xp[:, :,  :-2, 1:-1] - x   # north neighbour − centre
+        ds = xp[:, :, 2:,   1:-1] - x   # south
+        de = xp[:, :, 1:-1, 2:]   - x   # east
+        dw = xp[:, :, 1:-1,  :-2] - x   # west
+        k  = self.k
+        cn = torch.exp(-(dn / k).pow(2))
+        cs = torch.exp(-(ds / k).pow(2))
+        ce = torch.exp(-(de / k).pow(2))
+        cw = torch.exp(-(dw / k).pow(2))
+        return x + self.lam * (cn*dn + cs*ds + ce*de + cw*dw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.n_steps):
+            x = self._pm_step(x)
+        return self.conv(x)
+
+
+def _replace_spatial_convs(model: nn.Module, replacement_fn) -> nn.Module:
+    """Walk module tree; replace every spatial Conv2d (kernel ≥ 3) via replacement_fn."""
     for name, module in model.named_children():
         if isinstance(module, nn.Conv2d) and module.kernel_size[0] >= 3:
-            robust = RobustConv(
-                module.in_channels, module.out_channels,
-                kernel_size=module.kernel_size[0],
-                stride=module.stride[0],
-                padding=module.padding[0],
-                groups=module.groups,
-                bias=module.bias is not None,
-                lam=lam,
-            )
-            robust.conv.weight = module.weight
+            new_mod = replacement_fn(module)
+            new_mod.conv.weight = module.weight
             if module.bias is not None:
-                robust.conv.bias = module.bias
-            setattr(model, name, robust)
+                new_mod.conv.bias = module.bias
+            setattr(model, name, new_mod)
         else:
-            make_robust(module, lam)
+            _replace_spatial_convs(module, replacement_fn)
     return model
+
+
+def make_robust(model: nn.Module, lam: float = 0.12) -> nn.Module:
+    """Replace every spatial Conv2d with RobustConv (isotropic Laplacian, ablation)."""
+    def _make(m):
+        return RobustConv(m.in_channels, m.out_channels,
+                          m.kernel_size[0], m.stride[0], m.padding[0],
+                          m.groups, m.bias is not None, lam=lam)
+    return _replace_spatial_convs(model, _make)
+
+
+def make_pm_robust(model: nn.Module,
+                   n_steps: int = 2, lam: float = 0.12, k: float = 0.3) -> nn.Module:
+    """Replace every spatial Conv2d with PMDiffusionConv (anisotropic PM diffusion)."""
+    def _make(m):
+        return PMDiffusionConv(m.in_channels, m.out_channels,
+                               m.kernel_size[0], m.stride[0], m.padding[0],
+                               m.groups, m.bias is not None,
+                               n_steps=n_steps, lam=lam, k=k)
+    return _replace_spatial_convs(model, _make)
 
 
 class ShapeEncoder(nn.Module):
@@ -1158,10 +1221,7 @@ class RGBEfficientNet(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
-#  ROBUSTCONV BACKBONE WRAPPERS
-#  Standard backbones with every spatial conv replaced by RobustConv.
-#  Same parameter count as the vanilla backbone — robustness comes
-#  purely from the Laplacian inductive bias, not extra capacity.
+#  BACKBONE WRAPPERS  (RobustConv — isotropic ablation)
 # ─────────────────────────────────────────────────────────────
 
 class RobustResNet(nn.Module):
@@ -1222,6 +1282,69 @@ class RobustEfficientNet(nn.Module):
         assert size in nets, f"size must be one of {list(nets.keys())}"
         net = nets[size](weights=None, num_classes=num_classes)
         make_robust(net, lam=lam)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+# ─────────────────────────────────────────────────────────────
+#  BACKBONE WRAPPERS  (PMDiffusionConv — anisotropic, main model)
+# ─────────────────────────────────────────────────────────────
+
+class PMResNet(nn.Module):
+    """
+    ResNet-18/34/50/101 with every spatial conv replaced by PMDiffusionConv.
+    Anisotropic Perona-Malik diffusion — edge-preserving, data-dependent,
+    nonlinear. Zero extra parameters vs baseline.
+    """
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet", n_steps: int = 2,
+                 lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets, f"depth must be one of {list(nets.keys())}"
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_pm_robust(net, n_steps=n_steps, lam=lam, k=k)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class PMConvNeXt(nn.Module):
+    """ConvNeXt-Tiny/Base with every spatial conv replaced by PMDiffusionConv."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet", n_steps: int = 2,
+                 lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        nets = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_pm_robust(net, n_steps=n_steps, lam=lam, k=k)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class PMEfficientNet(nn.Module):
+    """EfficientNet-B0/B4 with every spatial conv replaced by PMDiffusionConv."""
+    def __init__(self, size: str = "b4", num_classes: int = 1000,
+                 dataset: str = "imagenet", n_steps: int = 2,
+                 lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_pm_robust(net, n_steps=n_steps, lam=lam, k=k)
         self.model = net
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1342,7 +1465,16 @@ MODEL_NAMES = [
     "baseline_convnext_base",     # ImageNet only
     "baseline_efficientnet_b0",   # ImageNet only
     "baseline_efficientnet_b4",   # ImageNet only
-    # ── RobustConv variants (same backbone, every 3×3 → RobustConv)
+    # ── PMDiffusionConv (anisotropic PM diffusion — main contribution) ──
+    "pmconv_res18",               # CIFAR + ImageNet
+    "pmconv_res34",               # CIFAR + ImageNet
+    "pmconv_res50",               # CIFAR + ImageNet
+    "pmconv_res101",              # CIFAR + ImageNet
+    "pmconv_convnext_tiny",       # ImageNet only
+    "pmconv_convnext_base",       # ImageNet only
+    "pmconv_effnet_b0",           # ImageNet only
+    "pmconv_effnet_b4",           # ImageNet only
+    # ── RobustConv (isotropic Laplacian — ablation only) ────────────
     "robustconv_res18",           # CIFAR + ImageNet
     "robustconv_res34",           # CIFAR + ImageNet
     "robustconv_res50",           # CIFAR + ImageNet
@@ -1394,7 +1526,16 @@ def build_model(name: str,
     if name == "baseline_efficientnet_b0": return BaselineEfficientNet("b0", **kw)
     if name == "baseline_efficientnet_b4": return BaselineEfficientNet("b4", **kw)
 
-    # ── RobustConv ────────────────────────────────────────────
+    # ── PMDiffusionConv (anisotropic — main) ──────────────────
+    if name == "pmconv_res18":         return PMResNet("18",  **kw)
+    if name == "pmconv_res34":         return PMResNet("34",  **kw)
+    if name == "pmconv_res50":         return PMResNet("50",  **kw)
+    if name == "pmconv_res101":        return PMResNet("101", **kw)
+    if name == "pmconv_convnext_tiny": return PMConvNeXt("tiny", **kw)
+    if name == "pmconv_convnext_base": return PMConvNeXt("base", **kw)
+    if name == "pmconv_effnet_b0":     return PMEfficientNet("b0", **kw)
+    if name == "pmconv_effnet_b4":     return PMEfficientNet("b4", **kw)
+    # ── RobustConv (isotropic — ablation) ─────────────────────
     if name == "robustconv_res18":         return RobustResNet("18",  **kw)
     if name == "robustconv_res34":         return RobustResNet("34",  **kw)
     if name == "robustconv_res50":         return RobustResNet("50",  **kw)

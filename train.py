@@ -113,6 +113,20 @@ GROUPS = {
                             "pmconv_l_res50",   "shape_res50"],
     "ablation_res101":     ["baseline_res101",  "robustconv_res101",
                             "pmconv_l_res101",  "shape_res101"],
+    # PMConv-A (adaptive k + shared conductance — pmconv-adaptive branch)
+    "pmconv_a_res50":      ["baseline_res50",            "pmconv_a_res50"],
+    "pmconv_a_res101":     ["baseline_res101",           "pmconv_a_res101"],
+    "pmconv_a_convnext":   ["baseline_convnext_tiny",    "pmconv_a_convnext_tiny"],
+    "pmconv_a_effnet":     ["baseline_efficientnet_b4",  "pmconv_a_effnet_b4"],
+    "pmconv_a_all":        ["baseline_res50",            "pmconv_a_res50",
+                            "baseline_res101",           "pmconv_a_res101",
+                            "baseline_convnext_tiny",    "pmconv_a_convnext_tiny",
+                            "baseline_efficientnet_b4",  "pmconv_a_effnet_b4"],
+    # L vs A ablation: fixed-k vs learnable-k anisotropic
+    "ablation_a_res50":    ["baseline_res50",  "robustconv_res50",
+                            "pmconv_l_res50",  "pmconv_a_res50"],
+    "ablation_a_res101":   ["baseline_res101", "robustconv_res101",
+                            "pmconv_l_res101", "pmconv_a_res101"],
 }
 
 # ──────────────────────────────────────────────────────────────

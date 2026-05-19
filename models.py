@@ -985,6 +985,75 @@ def make_pm_robust(model: nn.Module,
     return _replace_spatial_convs(model, _make)
 
 
+# ─────────────────────────────────────────────────────────────
+#  PMDIFFUSIONCONVA  —  adaptive k + shared conductance
+# ─────────────────────────────────────────────────────────────
+
+class PMDiffusionConvA(nn.Module):
+    """
+    Adaptive PMDiffusionConv: shared conductance + learnable per-layer k.
+
+    Two improvements over PMDiffusionConv (pmconv_l):
+
+    1. Shared conductance: gradient magnitude is averaged across channels,
+       producing one (B, 1, H, W) edge map shared by all channels. This
+       replaces C per-channel divisions with a single division — reducing
+       the most expensive PM operation by ~4C×. More principled too: edges
+       are structural properties of the feature field, not per-channel
+       accidents.
+
+    2. Learnable k (log-parameterized, 1 scalar per layer): each layer
+       independently learns its optimal conductance threshold. Shallow layers
+       tend to keep k small (fine edge preservation); deeper layers may grow k,
+       allowing semantic blurring of block artifacts (pixelation) that appear
+       as "edges" at the pixel level but are not meaningful boundaries in deep
+       feature space.
+
+    Overhead: ~1 scalar (log_k2) added per wrapped conv. The shared conductance
+    substantially reduces the per-step FLOPs vs PMDiffusionConv.
+    """
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernel_size: int = 3, stride: int = 1,
+                 padding: int = 1, groups: int = 1,
+                 bias: bool = False,
+                 n_steps: int = 1, lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        self.conv    = nn.Conv2d(in_channels, out_channels, kernel_size,
+                                 stride, padding, groups=groups, bias=bias)
+        self.n_steps = n_steps
+        self.lam     = lam
+        self.log_k2  = nn.Parameter(torch.tensor(math.log(k * k)))
+
+    def _pm_step(self, x: torch.Tensor) -> torch.Tensor:
+        xp   = F.pad(x, (1, 1, 1, 1), mode='reflect')
+        dn   = xp[:, :,  :-2, 1:-1] - x
+        ds   = xp[:, :, 2:,   1:-1] - x
+        de   = xp[:, :, 1:-1, 2:]   - x
+        dw   = xp[:, :, 1:-1,  :-2] - x
+        k2   = self.log_k2.exp()
+        # shared edge map: mean squared directional gradient across channels
+        # one division replaces C per-channel Lorentzian divisions
+        mag2 = (dn.pow(2) + ds.pow(2) + de.pow(2) + dw.pow(2)).mean(dim=1, keepdim=True)
+        c    = k2 / (k2 + mag2)                                   # (B, 1, H, W)
+        return x + self.lam * c * (dn + ds + de + dw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.n_steps):
+            x = self._pm_step(x)
+        return self.conv(x)
+
+
+def make_pm_adaptive(model: nn.Module,
+                     n_steps: int = 1, lam: float = 0.12, k: float = 0.3) -> nn.Module:
+    """Replace every spatial Conv2d with PMDiffusionConvA (adaptive k, shared conductance)."""
+    def _make(m):
+        return PMDiffusionConvA(m.in_channels, m.out_channels,
+                                m.kernel_size[0], m.stride[0], m.padding[0],
+                                m.groups, m.bias is not None,
+                                n_steps=n_steps, lam=lam, k=k)
+    return _replace_spatial_convs(model, _make)
+
+
 class ShapeEncoder(nn.Module):
     """
     Hierarchical shape feature extractor — fully scalable.
@@ -1360,6 +1429,68 @@ class PMEfficientNet(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
+#  BACKBONE WRAPPERS  (PMDiffusionConvA — adaptive, this branch)
+# ─────────────────────────────────────────────────────────────
+
+class PMAdaptiveResNet(nn.Module):
+    """
+    ResNet-18/34/50/101 with every spatial conv replaced by PMDiffusionConvA.
+    Adaptive k + shared conductance vs PMResNet (fixed k, per-channel conductance).
+    """
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet", n_steps: int = 1,
+                 lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets, f"depth must be one of {list(nets.keys())}"
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_pm_adaptive(net, n_steps=n_steps, lam=lam, k=k)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class PMAdaptiveConvNeXt(nn.Module):
+    """ConvNeXt-Tiny/Base with every spatial conv replaced by PMDiffusionConvA."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet", n_steps: int = 1,
+                 lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        nets = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_pm_adaptive(net, n_steps=n_steps, lam=lam, k=k)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class PMAdaptiveEfficientNet(nn.Module):
+    """EfficientNet-B0/B4 with every spatial conv replaced by PMDiffusionConvA."""
+    def __init__(self, size: str = "b4", num_classes: int = 1000,
+                 dataset: str = "imagenet", n_steps: int = 1,
+                 lam: float = 0.12, k: float = 0.3):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_pm_adaptive(net, n_steps=n_steps, lam=lam, k=k)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+# ─────────────────────────────────────────────────────────────
 #  SHAPE-BIAS NET  (main model)
 # ─────────────────────────────────────────────────────────────
 
@@ -1473,7 +1604,7 @@ MODEL_NAMES = [
     "baseline_convnext_base",     # ImageNet only
     "baseline_efficientnet_b0",   # ImageNet only
     "baseline_efficientnet_b4",   # ImageNet only
-    # ── PMConv-L (Lorentzian conductance, n_steps=1 — fast, this branch) ──
+    # ── PMConv-L (Lorentzian conductance, n_steps=1 — pmconv-scale branch) ──
     "pmconv_l_res18",             # CIFAR + ImageNet
     "pmconv_l_res34",             # CIFAR + ImageNet
     "pmconv_l_res50",             # CIFAR + ImageNet
@@ -1482,6 +1613,15 @@ MODEL_NAMES = [
     "pmconv_l_convnext_base",     # ImageNet only
     "pmconv_l_effnet_b0",         # ImageNet only
     "pmconv_l_effnet_b4",         # ImageNet only
+    # ── PMConv-A (shared conductance + learnable k — pmconv-adaptive branch) ──
+    "pmconv_a_res18",             # CIFAR + ImageNet
+    "pmconv_a_res34",             # CIFAR + ImageNet
+    "pmconv_a_res50",             # CIFAR + ImageNet
+    "pmconv_a_res101",            # CIFAR + ImageNet
+    "pmconv_a_convnext_tiny",     # ImageNet only
+    "pmconv_a_convnext_base",     # ImageNet only
+    "pmconv_a_effnet_b0",         # ImageNet only
+    "pmconv_a_effnet_b4",         # ImageNet only
     # ── RobustConv (isotropic Laplacian — ablation only) ────────────
     "robustconv_res18",           # CIFAR + ImageNet
     "robustconv_res34",           # CIFAR + ImageNet
@@ -1534,7 +1674,7 @@ def build_model(name: str,
     if name == "baseline_efficientnet_b0": return BaselineEfficientNet("b0", **kw)
     if name == "baseline_efficientnet_b4": return BaselineEfficientNet("b4", **kw)
 
-    # ── PMConv-L (Lorentzian, n_steps=1, fast — this branch) ─
+    # ── PMConv-L (Lorentzian, n_steps=1 — pmconv-scale branch) ──
     if name == "pmconv_l_res18":         return PMResNet("18",  **kw)
     if name == "pmconv_l_res34":         return PMResNet("34",  **kw)
     if name == "pmconv_l_res50":         return PMResNet("50",  **kw)
@@ -1543,6 +1683,16 @@ def build_model(name: str,
     if name == "pmconv_l_convnext_base": return PMConvNeXt("base", **kw)
     if name == "pmconv_l_effnet_b0":     return PMEfficientNet("b0", **kw)
     if name == "pmconv_l_effnet_b4":     return PMEfficientNet("b4", **kw)
+
+    # ── PMConv-A (adaptive k + shared conductance — this branch) ─
+    if name == "pmconv_a_res18":         return PMAdaptiveResNet("18",  **kw)
+    if name == "pmconv_a_res34":         return PMAdaptiveResNet("34",  **kw)
+    if name == "pmconv_a_res50":         return PMAdaptiveResNet("50",  **kw)
+    if name == "pmconv_a_res101":        return PMAdaptiveResNet("101", **kw)
+    if name == "pmconv_a_convnext_tiny": return PMAdaptiveConvNeXt("tiny", **kw)
+    if name == "pmconv_a_convnext_base": return PMAdaptiveConvNeXt("base", **kw)
+    if name == "pmconv_a_effnet_b0":     return PMAdaptiveEfficientNet("b0", **kw)
+    if name == "pmconv_a_effnet_b4":     return PMAdaptiveEfficientNet("b4", **kw)
     # ── RobustConv (isotropic — ablation) ─────────────────────
     if name == "robustconv_res18":         return RobustResNet("18",  **kw)
     if name == "robustconv_res34":         return RobustResNet("34",  **kw)

@@ -4,19 +4,33 @@
 #
 # EXPERIMENT GROUPS — use --run_group <name> or --model <name>
 #
-# ── All model families (33 total) ───────────────────────────────────────
+# ── All model families (41 total) ───────────────────────────────────────
 #
 #   BASELINES  (vanilla backbone, no modification):
 #     baseline_res18 / baseline_res34 / baseline_res50 / baseline_res101
 #     baseline_convnext_tiny / baseline_convnext_base
 #     baseline_efficientnet_b0 / baseline_efficientnet_b4
 #
-#   PMCONV-L  ★ main contribution — PM anisotropic diffusion, Lorentzian, n_steps=1
-#     Lorentzian conductance (no exp), 1 step per conv. ~1.13x overhead vs baseline.
+#   PMCONV-L  (pmconv-scale branch — Lorentzian, fixed k, n_steps=1)
+#     Per-channel Lorentzian conductance (no exp), fixed k=0.3, 1 step per conv.
+#     Measured ~2.5x overhead vs baseline (many per-channel divisions).
 #     pmconv_l_res18 / pmconv_l_res34 / pmconv_l_res50 / pmconv_l_res101
 #     pmconv_l_convnext_tiny / pmconv_l_convnext_base
 #     pmconv_l_effnet_b0 / pmconv_l_effnet_b4
-#     (scale branch has pmconv_* with Leclerc exp + n_steps=2 for ablation)
+#
+#   PMCONV-A  ★ main contribution — this branch (pmconv-adaptive)
+#     Same Perona-Malik anisotropic diffusion as pmconv_l, two improvements:
+#       1. Shared conductance: gradient magnitude averaged across channels →
+#          single division per spatial position (vs C divisions in pmconv_l).
+#          ~C× fewer divisions per layer; effectively reduces PM overhead ~3-5×.
+#       2. Learnable k per layer: each conv learns its own conductance threshold
+#          (log-parameterized scalar). Shallow layers keep small k (fine edges);
+#          deep layers may grow k (blur block artifacts / pixelation semantically).
+#     Principled story: Lorentzian energy E = k²·log(1+|∇|²/k²) minimization;
+#     learned k = depth-adaptive shape-regularization strength.
+#     pmconv_a_res18 / pmconv_a_res34 / pmconv_a_res50 / pmconv_a_res101
+#     pmconv_a_convnext_tiny / pmconv_a_convnext_base
+#     pmconv_a_effnet_b0 / pmconv_a_effnet_b4
 #
 #   ROBUSTCONV  (ablation — isotropic Laplacian diffusion Conv):
 #     Same as PMConv but isotropic — blurs edges, network can compensate.
@@ -31,16 +45,23 @@
 #
 # ── Run groups ───────────────────────────────────────────────────────────
 #
-#   PMConv-L (this branch — Lorentzian, n_steps=1, ~1.13x overhead):
-#     pmconv_l_res50     : baseline_res50    + pmconv_l_res50
-#     pmconv_l_res101    : baseline_res101   + pmconv_l_res101
-#     pmconv_l_convnext  : baseline_convnext_tiny + pmconv_l_convnext_tiny
-#     pmconv_l_effnet    : baseline_efficientnet_b4 + pmconv_l_effnet_b4
-#     pmconv_l_all       : all four backbone pairs
+#   PMConv-A (this branch — adaptive k, shared conductance):
+#     pmconv_a_res50     : baseline_res50    + pmconv_a_res50
+#     pmconv_a_res101    : baseline_res101   + pmconv_a_res101
+#     pmconv_a_convnext  : baseline_convnext_tiny + pmconv_a_convnext_tiny
+#     pmconv_a_effnet    : baseline_efficientnet_b4 + pmconv_a_effnet_b4
+#     pmconv_a_all       : all four backbone pairs
 #
-#   Ablation (four-way: baseline / isotropic / anisotropic-L / dual-stream):
-#     ablation_res50   : baseline + robustconv + pmconv_l + shape  (res50)
-#     ablation_res101  : baseline + robustconv + pmconv_l + shape  (res101)
+#   L vs A ablation (fixed-k vs learnable-k):
+#     ablation_a_res50   : baseline + robustconv + pmconv_l + pmconv_a  (res50)
+#     ablation_a_res101  : baseline + robustconv + pmconv_l + pmconv_a  (res101)
+#
+#   PMConv-L (pmconv-scale branch — kept for reference):
+#     pmconv_l_res50 / pmconv_l_res101 / pmconv_l_convnext / pmconv_l_effnet
+#     pmconv_l_all
+#
+#   Full ablation (four-way: baseline / isotropic / anisotropic-L / dual-stream):
+#     ablation_res50 / ablation_res101
 #
 #   RobustConv (isotropic ablation only):
 #     robustconv_res50 / robustconv_res101 / robustconv_all
@@ -52,19 +73,19 @@
 # To run a SINGLE model: replace --run_group with --model <name>
 #
 # Nautilus resource policy:
-#   CPU  request=5, limit=6   → ratio 6/5 = 1.2 exactly  ✓
-#   RAM  request=20Gi, limit=24Gi → ratio 24/20 = 1.2 exactly  ✓
+#   CPU  request=3, limit=3
+#   RAM  request=10Gi, limit=12Gi
 #   GPU  request=1, limit=1   → limits == requests  ✓
 #   backoffLimit=0 — fail fast, investigate manually  ✓
 #
-# Submit:  kubectl apply -f k8s/combined-job.yaml
-# Logs:    kubectl logs -f job/shape-resnet-pipeline -n kc-ai-research-lab
-# Delete:  kubectl delete job shape-resnet-pipeline -n kc-ai-research-lab
+# Submit:  kubectl apply -f combined-job.yaml
+# Logs:    kubectl logs -f job/pmconv-a-res101-img -n kc-ai-research-lab
+# Delete:  kubectl delete job pmconv-a-res101-img -n kc-ai-research-lab
 # ─────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: pmconv-l-res101-img
+  name: pmconv-a-res101-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -94,11 +115,11 @@ spec:
 
               # ── Step 0: Clone repo ────────────────────────────
               echo "=========================================="
-              echo "  Step 0: Cloning repo (branch: pmconv-scale)"
+              echo "  Step 0: Cloning repo (branch: pmconv-adaptive)"
               echo "=========================================="
               apt-get update -qq && apt-get install -y -qq git
               git clone \
-                --branch pmconv-scale \
+                --branch pmconv-adaptive \
                 --single-branch \
                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
                 /shapebiasnet
@@ -126,7 +147,7 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       pmconv_l_res101 \
+                --model       pmconv_a_res101 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -140,7 +161,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       pmconv_l_res101 \
+                --model       pmconv_a_res101 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

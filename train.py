@@ -127,6 +127,38 @@ GROUPS = {
                             "pmconv_l_res50",  "pmconv_a_res50"],
     "ablation_a_res101":   ["baseline_res101", "robustconv_res101",
                             "pmconv_l_res101", "pmconv_a_res101"],
+    # ── FDN (freq-norm branch) ────────────────────────────────
+    "fdn_res50":           ["baseline_res50",            "fdn_res50"],
+    "fdn_res101":          ["baseline_res101",           "fdn_res101"],
+    "fdn_convnext":        ["baseline_convnext_tiny",    "fdn_convnext_tiny"],
+    "fdn_effnet":          ["baseline_efficientnet_b4",  "fdn_effnet_b4"],
+    "fdn_all":             ["baseline_res50",            "fdn_res50",
+                            "baseline_res101",           "fdn_res101",
+                            "baseline_convnext_tiny",    "fdn_convnext_tiny",
+                            "baseline_efficientnet_b4",  "fdn_effnet_b4"],
+    # ── INSC (freq-norm branch) ───────────────────────────────
+    "insc_res50":          ["baseline_res50",            "insc_res50"],
+    "insc_res101":         ["baseline_res101",           "insc_res101"],
+    "insc_convnext":       ["baseline_convnext_tiny",    "insc_convnext_tiny"],
+    "insc_effnet":         ["baseline_efficientnet_b4",  "insc_effnet_b4"],
+    "insc_all":            ["baseline_res50",            "insc_res50",
+                            "baseline_res101",           "insc_res101",
+                            "baseline_convnext_tiny",    "insc_convnext_tiny",
+                            "baseline_efficientnet_b4",  "insc_effnet_b4"],
+    # ── FDN+INSC combined ★ main contribution ────────────────
+    "fdn_insc_res50":      ["baseline_res50",            "fdn_insc_res50"],
+    "fdn_insc_res101":     ["baseline_res101",           "fdn_insc_res101"],
+    "fdn_insc_convnext":   ["baseline_convnext_tiny",    "fdn_insc_convnext_tiny"],
+    "fdn_insc_effnet":     ["baseline_efficientnet_b4",  "fdn_insc_effnet_b4"],
+    "fdn_insc_all":        ["baseline_res50",            "fdn_insc_res50",
+                            "baseline_res101",           "fdn_insc_res101",
+                            "baseline_convnext_tiny",    "fdn_insc_convnext_tiny",
+                            "baseline_efficientnet_b4",  "fdn_insc_effnet_b4"],
+    # ── Four-way ablation: baseline / fdn / insc / fdn+insc ──
+    "ablation_fn_res50":   ["baseline_res50",  "fdn_res50",
+                            "insc_res50",      "fdn_insc_res50"],
+    "ablation_fn_res101":  ["baseline_res101", "fdn_res101",
+                            "insc_res101",     "fdn_insc_res101"],
 }
 
 # ──────────────────────────────────────────────────────────────

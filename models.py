@@ -1054,6 +1054,342 @@ def make_pm_adaptive(model: nn.Module,
     return _replace_spatial_convs(model, _make)
 
 
+# ─────────────────────────────────────────────────────────────
+#  FREQUENCY-DECOUPLED NORMALIZATION (FDN)
+#
+#  Drop-in replacement for BatchNorm2d. Decomposes x into a
+#  low-frequency component (local AvgPool) and high-frequency
+#  residual, then applies BN to LF and IN to HF.
+#
+#  BN: batch-level normalisation → stable for semantic (LF) content.
+#  IN: instance-level normalisation → removes corruption-induced (HF) variance.
+#
+#  Applied to ALL channels at ALL BN layers — unlike IBN-Net which
+#  selects channels heuristically in early layers only.
+#
+#  Closest prior work: IBN-Net (Pan et al., ECCV 2018).
+#  FDN differs: spatial-frequency split via AvgPool vs channel split.
+# ─────────────────────────────────────────────────────────────
+
+class FDN(nn.Module):
+    """
+    Frequency-Decoupled Normalization: drop-in BatchNorm2d replacement.
+
+        x_lf = AvgPool2d(x, k=3)     # low-freq  (local mean)
+        x_hf = x − x_lf              # high-freq (local residual)
+        out  = BN(x_lf) + IN(x_hf)
+
+    Corruptions (noise, JPEG, blur artifacts) predominantly shift
+    the HF statistics. IN removes this instance-specific shift.
+    BN preserves the inter-class semantic structure in LF.
+    """
+    def __init__(self, num_features: int, eps: float = 1e-5,
+                 momentum: float = 0.1, affine: bool = True):
+        super().__init__()
+        self.bn  = nn.BatchNorm2d(num_features, eps=eps,
+                                  momentum=momentum, affine=affine)
+        self.in_ = nn.InstanceNorm2d(num_features, eps=eps, affine=affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_lf = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        x_hf = x - x_lf
+        return self.bn(x_lf) + self.in_(x_hf)
+
+
+def make_fdn(model: nn.Module) -> nn.Module:
+    """Replace every BatchNorm2d in model with FDN (in-place, recursive)."""
+    for name, module in model.named_children():
+        if isinstance(module, nn.BatchNorm2d):
+            fdn = FDN(module.num_features, module.eps,
+                      module.momentum, module.affine)
+            fdn.bn.running_mean.copy_(module.running_mean)
+            fdn.bn.running_var.copy_(module.running_var)
+            if module.affine:
+                fdn.bn.weight.data.copy_(module.weight.data)
+                fdn.bn.bias.data.copy_(module.bias.data)
+            setattr(model, name, fdn)
+        else:
+            make_fdn(module)
+    return model
+
+
+# ─────────────────────────────────────────────────────────────
+#  INSTANCE-NORMALIZED SKIP CONNECTIONS (INSC)
+#
+#  Patches every residual block to apply IN to the shortcut
+#  before the residual add:
+#
+#    Standard:  out = F(x) + x
+#    INSC:      out = F(x) + IN(x)
+#
+#  Skip connections are a "corruption highway" — they carry raw
+#  corrupted activations directly to deep layers, bypassing all
+#  learned processing inside the block. IN removes instance-level
+#  texture/style variance from the skip.
+#
+#  Predictive-coding framing: skip = top-down prior (should be
+#  style-invariant); F(x) = prediction error (discriminative update).
+#  IN enforces style-invariance on the prior.
+#
+#  Closest prior work: ResNorm (Kim et al., DCASE 2021) uses
+#  λ·x + FreqIN(x) for audio spectrograms. INSC applies spatial
+#  IN to image CNN residual blocks for corruption robustness.
+#
+#  Supports: ResNet (BasicBlock/Bottleneck), ConvNeXt (CNBlock),
+#            EfficientNet (MBConv/FusedMBConv with use_res_connect).
+# ─────────────────────────────────────────────────────────────
+
+def _patch_basicblock_insc(block) -> None:
+    out_ch = block.conv2.out_channels
+    block.in_skip = nn.InstanceNorm2d(out_ch, affine=True)
+
+    def forward(x):
+        out = block.conv1(x)
+        out = block.bn1(out)
+        out = block.relu(out)
+        out = block.conv2(out)
+        out = block.bn2(out)
+        identity = block.downsample(x) if block.downsample is not None else x
+        out = out + block.in_skip(identity)
+        return block.relu(out)
+
+    block.forward = forward
+
+
+def _patch_bottleneck_insc(block) -> None:
+    out_ch = block.conv3.out_channels
+    block.in_skip = nn.InstanceNorm2d(out_ch, affine=True)
+
+    def forward(x):
+        out = block.conv1(x)
+        out = block.bn1(out)
+        out = block.relu(out)
+        out = block.conv2(out)
+        out = block.bn2(out)
+        out = block.relu(out)
+        out = block.conv3(out)
+        out = block.bn3(out)
+        identity = block.downsample(x) if block.downsample is not None else x
+        out = out + block.in_skip(identity)
+        return block.relu(out)
+
+    block.forward = forward
+
+
+def _patch_cnblock_insc(block) -> None:
+    out_ch = block.layer_scale.shape[0]
+    block.in_skip = nn.InstanceNorm2d(out_ch, affine=True)
+
+    def forward(x):
+        result = block.layer_scale * block.block(x)
+        result = block.stochastic_depth(result)
+        return result + block.in_skip(x)
+
+    block.forward = forward
+
+
+def _patch_mbconv_insc(block) -> None:
+    in_ch = None
+    for m in block.block.modules():
+        if isinstance(m, nn.Conv2d):
+            in_ch = m.in_channels
+            break
+    if in_ch is None:
+        return
+    block.in_skip = nn.InstanceNorm2d(in_ch, affine=True)
+
+    def forward(x):
+        result = block.block(x)
+        if block.use_res_connect:
+            result = block.stochastic_depth(result)
+            result = result + block.in_skip(x)
+        return result
+
+    block.forward = forward
+
+
+def make_insc(model: nn.Module) -> nn.Module:
+    """
+    Patch all residual/skip blocks to apply IN to shortcut before residual add.
+    Handles ResNet, ConvNeXt, EfficientNet generically via class-name dispatch.
+    """
+    for module in model.modules():
+        cls = type(module).__name__
+        if cls == 'BasicBlock':
+            _patch_basicblock_insc(module)
+        elif cls == 'Bottleneck':
+            _patch_bottleneck_insc(module)
+        elif cls == 'CNBlock':
+            _patch_cnblock_insc(module)
+        elif cls in ('MBConv', 'FusedMBConv') and getattr(module, 'use_res_connect', False):
+            _patch_mbconv_insc(module)
+    return model
+
+
+# ─────────────────────────────────────────────────────────────
+#  BACKBONE WRAPPERS  (FDN / INSC / FDN+INSC — freq-norm branch)
+# ─────────────────────────────────────────────────────────────
+
+class FDNResNet(nn.Module):
+    """ResNet with all BatchNorm2d replaced by FDN."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_fdn(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class ISCResNet(nn.Module):
+    """ResNet with IN applied to every residual skip before the add."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNISCResNet(nn.Module):
+    """ResNet with FDN on all BN layers and INSC on all skip connections."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_fdn(net)
+        make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNConvNeXt(nn.Module):
+    """ConvNeXt with FDN. ConvNeXt uses LayerNorm (no BN), so FDN is a no-op —
+    kept for ablation completeness. Use ISCConvNeXt for the meaningful change."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        nets = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_fdn(net)   # no-op: ConvNeXt has no BatchNorm2d
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class ISCConvNeXt(nn.Module):
+    """ConvNeXt with IN applied to every CNBlock skip connection."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        nets = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNISCConvNeXt(nn.Module):
+    """ConvNeXt with FDN + INSC (effectively INSC-only since FDN is no-op)."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        nets = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_fdn(net)
+        make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNEfficientNet(nn.Module):
+    """EfficientNet with all BatchNorm2d replaced by FDN."""
+    def __init__(self, size: str = "b4", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_fdn(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class ISCEfficientNet(nn.Module):
+    """EfficientNet with IN applied to every MBConv skip connection."""
+    def __init__(self, size: str = "b4", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNISCEfficientNet(nn.Module):
+    """EfficientNet with FDN on BN layers and INSC on MBConv skips."""
+    def __init__(self, size: str = "b4", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_fdn(net)
+        make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
 class ShapeEncoder(nn.Module):
     """
     Hierarchical shape feature extractor — fully scalable.
@@ -1631,6 +1967,33 @@ MODEL_NAMES = [
     "robustconv_convnext_base",   # ImageNet only
     "robustconv_effnet_b0",       # ImageNet only
     "robustconv_effnet_b4",       # ImageNet only
+    # ── FDN (Frequency-Decoupled Normalization — freq-norm branch) ──────
+    "fdn_res18",              # CIFAR + ImageNet
+    "fdn_res34",              # CIFAR + ImageNet
+    "fdn_res50",              # CIFAR + ImageNet
+    "fdn_res101",             # CIFAR + ImageNet
+    "fdn_convnext_tiny",      # ImageNet only (FDN no-op; same as baseline)
+    "fdn_convnext_base",      # ImageNet only (FDN no-op; same as baseline)
+    "fdn_effnet_b0",          # ImageNet only
+    "fdn_effnet_b4",          # ImageNet only
+    # ── INSC (Instance-Normalized Skip Connections) ───────────────────
+    "insc_res18",             # CIFAR + ImageNet
+    "insc_res34",             # CIFAR + ImageNet
+    "insc_res50",             # CIFAR + ImageNet
+    "insc_res101",            # CIFAR + ImageNet
+    "insc_convnext_tiny",     # ImageNet only
+    "insc_convnext_base",     # ImageNet only
+    "insc_effnet_b0",         # ImageNet only
+    "insc_effnet_b4",         # ImageNet only
+    # ── FDN + INSC combined ★ main contribution (freq-norm branch) ────
+    "fdn_insc_res18",         # CIFAR + ImageNet
+    "fdn_insc_res34",         # CIFAR + ImageNet
+    "fdn_insc_res50",         # CIFAR + ImageNet
+    "fdn_insc_res101",        # CIFAR + ImageNet
+    "fdn_insc_convnext_tiny", # ImageNet only (INSC-only; FDN no-op)
+    "fdn_insc_convnext_base", # ImageNet only (INSC-only; FDN no-op)
+    "fdn_insc_effnet_b0",     # ImageNet only
+    "fdn_insc_effnet_b4",     # ImageNet only
     # ── ShapeBiasNet variants (dual-stream, for comparison) ────
     "shape_custom",               # CIFAR only  (lightweight custom backbone)
     "shape_res18",                # CIFAR + ImageNet
@@ -1702,6 +2065,36 @@ def build_model(name: str,
     if name == "robustconv_convnext_base": return RobustConvNeXt("base", **kw)
     if name == "robustconv_effnet_b0":     return RobustEfficientNet("b0", **kw)
     if name == "robustconv_effnet_b4":     return RobustEfficientNet("b4", **kw)
+
+    # ── FDN ───────────────────────────────────────────────────
+    if name == "fdn_res18":          return FDNResNet("18",  **kw)
+    if name == "fdn_res34":          return FDNResNet("34",  **kw)
+    if name == "fdn_res50":          return FDNResNet("50",  **kw)
+    if name == "fdn_res101":         return FDNResNet("101", **kw)
+    if name == "fdn_convnext_tiny":  return FDNConvNeXt("tiny", **kw)
+    if name == "fdn_convnext_base":  return FDNConvNeXt("base", **kw)
+    if name == "fdn_effnet_b0":      return FDNEfficientNet("b0", **kw)
+    if name == "fdn_effnet_b4":      return FDNEfficientNet("b4", **kw)
+
+    # ── INSC ──────────────────────────────────────────────────
+    if name == "insc_res18":         return ISCResNet("18",  **kw)
+    if name == "insc_res34":         return ISCResNet("34",  **kw)
+    if name == "insc_res50":         return ISCResNet("50",  **kw)
+    if name == "insc_res101":        return ISCResNet("101", **kw)
+    if name == "insc_convnext_tiny": return ISCConvNeXt("tiny", **kw)
+    if name == "insc_convnext_base": return ISCConvNeXt("base", **kw)
+    if name == "insc_effnet_b0":     return ISCEfficientNet("b0", **kw)
+    if name == "insc_effnet_b4":     return ISCEfficientNet("b4", **kw)
+
+    # ── FDN + INSC (main contribution) ────────────────────────
+    if name == "fdn_insc_res18":          return FDNISCResNet("18",  **kw)
+    if name == "fdn_insc_res34":          return FDNISCResNet("34",  **kw)
+    if name == "fdn_insc_res50":          return FDNISCResNet("50",  **kw)
+    if name == "fdn_insc_res101":         return FDNISCResNet("101", **kw)
+    if name == "fdn_insc_convnext_tiny":  return FDNISCConvNeXt("tiny", **kw)
+    if name == "fdn_insc_convnext_base":  return FDNISCConvNeXt("base", **kw)
+    if name == "fdn_insc_effnet_b0":      return FDNISCEfficientNet("b0", **kw)
+    if name == "fdn_insc_effnet_b4":      return FDNISCEfficientNet("b4", **kw)
 
     # ── ShapeBiasNet ──────────────────────────────────────────
     if name == "shape_custom":        return ShapeBiasNet("custom",        **kw)

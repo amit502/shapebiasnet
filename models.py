@@ -1226,6 +1226,109 @@ def make_insc(model: nn.Module) -> nn.Module:
     return model
 
 
+# ── Gated INSC ────────────────────────────────────────────────
+# Learnable per-block gate: out = (1-g)·identity + g·IN(identity)
+# Gate initialized to sigmoid(-3)≈0.047 so training starts as standard ResNet.
+# The network learns where texture stripping is beneficial vs harmful.
+
+class GatedINSC(nn.Module):
+    def __init__(self, num_features: int):
+        super().__init__()
+        self.in_skip = nn.InstanceNorm2d(num_features, affine=True)
+        self.gate    = nn.Parameter(torch.full((1,), -3.0))
+
+    def forward(self, identity: torch.Tensor) -> torch.Tensor:
+        g = torch.sigmoid(self.gate)
+        return (1.0 - g) * identity + g * self.in_skip(identity)
+
+
+def _patch_basicblock_ginsc(block) -> None:
+    out_ch = block.conv2.out_channels
+    block.ginsc = GatedINSC(out_ch)
+
+    def forward(x):
+        out = block.conv1(x)
+        out = block.bn1(out)
+        out = block.relu(out)
+        out = block.conv2(out)
+        out = block.bn2(out)
+        identity = block.downsample(x) if block.downsample is not None else x
+        out = out + block.ginsc(identity)
+        return block.relu(out)
+
+    block.forward = forward
+
+
+def _patch_bottleneck_ginsc(block) -> None:
+    out_ch = block.conv3.out_channels
+    block.ginsc = GatedINSC(out_ch)
+
+    def forward(x):
+        out = block.conv1(x)
+        out = block.bn1(out)
+        out = block.relu(out)
+        out = block.conv2(out)
+        out = block.bn2(out)
+        out = block.relu(out)
+        out = block.conv3(out)
+        out = block.bn3(out)
+        identity = block.downsample(x) if block.downsample is not None else x
+        out = out + block.ginsc(identity)
+        return block.relu(out)
+
+    block.forward = forward
+
+
+def _patch_cnblock_ginsc(block) -> None:
+    out_ch = block.layer_scale.shape[0]
+    block.ginsc = GatedINSC(out_ch)
+
+    def forward(x):
+        result = block.layer_scale * block.block(x)
+        result = block.stochastic_depth(result)
+        return result + block.ginsc(x)
+
+    block.forward = forward
+
+
+def _patch_mbconv_ginsc(block) -> None:
+    in_ch = None
+    for m in block.block.modules():
+        if isinstance(m, nn.Conv2d):
+            in_ch = m.in_channels
+            break
+    if in_ch is None:
+        return
+    block.ginsc = GatedINSC(in_ch)
+
+    def forward(x):
+        result = block.block(x)
+        if block.use_res_connect:
+            result = block.stochastic_depth(result)
+            result = result + block.ginsc(x)
+        return result
+
+    block.forward = forward
+
+
+def make_ginsc(model: nn.Module) -> nn.Module:
+    """
+    Patch all residual/skip blocks with a learnable gated IN on the shortcut.
+    Architecture-agnostic: handles ResNet, ConvNeXt, EfficientNet.
+    """
+    for module in model.modules():
+        cls = type(module).__name__
+        if cls == 'BasicBlock':
+            _patch_basicblock_ginsc(module)
+        elif cls == 'Bottleneck':
+            _patch_bottleneck_ginsc(module)
+        elif cls == 'CNBlock':
+            _patch_cnblock_ginsc(module)
+        elif cls in ('MBConv', 'FusedMBConv') and getattr(module, 'use_res_connect', False):
+            _patch_mbconv_ginsc(module)
+    return model
+
+
 # ─────────────────────────────────────────────────────────────
 #  BACKBONE WRAPPERS  (FDN / INSC / FDN+INSC — freq-norm branch)
 # ─────────────────────────────────────────────────────────────
@@ -1384,6 +1487,81 @@ class FDNISCEfficientNet(nn.Module):
         net = nets[size](weights=None, num_classes=num_classes)
         make_fdn(net)
         make_insc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class GISCResNet(nn.Module):
+    """ResNet with Gated INSC on all skip connections."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_ginsc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNGISCResNet(nn.Module):
+    """ResNet with FDN on all BN layers and Gated INSC on all skip connections."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_fdn(net)
+        make_ginsc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNGISCConvNeXt(nn.Module):
+    """ConvNeXt with Gated INSC on all skip connections. FDN is a no-op (no BN2d)."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        builders = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in builders
+        net = builders[size](weights=None)
+        net.classifier[-1] = nn.Linear(net.classifier[-1].in_features, num_classes)
+        make_ginsc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class FDNGISCEfficientNet(nn.Module):
+    """EfficientNet with FDN on BN layers and Gated INSC on MBConv skips."""
+    def __init__(self, size: str = "b0", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_fdn(net)
+        make_ginsc(net)
         self.model = net
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1994,6 +2172,19 @@ MODEL_NAMES = [
     "fdn_insc_convnext_base", # ImageNet only (INSC-only; FDN no-op)
     "fdn_insc_effnet_b0",     # ImageNet only
     "fdn_insc_effnet_b4",     # ImageNet only
+    # ── Gated INSC (learnable gate per block — architecture-agnostic) ────
+    "ginsc_res18",            # CIFAR + ImageNet
+    "ginsc_res34",            # CIFAR + ImageNet
+    "ginsc_res50",            # CIFAR + ImageNet
+    "ginsc_res101",           # CIFAR + ImageNet
+    "fdn_ginsc_res18",        # CIFAR + ImageNet
+    "fdn_ginsc_res34",        # CIFAR + ImageNet
+    "fdn_ginsc_res50",        # CIFAR + ImageNet
+    "fdn_ginsc_res101",       # CIFAR + ImageNet
+    "fdn_ginsc_convnext_tiny",# ImageNet only (GINSC-only; FDN no-op)
+    "fdn_ginsc_convnext_base",# ImageNet only (GINSC-only; FDN no-op)
+    "fdn_ginsc_effnet_b0",    # ImageNet only
+    "fdn_ginsc_effnet_b4",    # ImageNet only
     # ── ShapeBiasNet variants (dual-stream, for comparison) ────
     "shape_custom",               # CIFAR only  (lightweight custom backbone)
     "shape_res18",                # CIFAR + ImageNet
@@ -2095,6 +2286,20 @@ def build_model(name: str,
     if name == "fdn_insc_convnext_base":  return FDNISCConvNeXt("base", **kw)
     if name == "fdn_insc_effnet_b0":      return FDNISCEfficientNet("b0", **kw)
     if name == "fdn_insc_effnet_b4":      return FDNISCEfficientNet("b4", **kw)
+
+    # ── Gated INSC ────────────────────────────────────────────
+    if name == "ginsc_res18":             return GISCResNet("18",  **kw)
+    if name == "ginsc_res34":             return GISCResNet("34",  **kw)
+    if name == "ginsc_res50":             return GISCResNet("50",  **kw)
+    if name == "ginsc_res101":            return GISCResNet("101", **kw)
+    if name == "fdn_ginsc_res18":         return FDNGISCResNet("18",  **kw)
+    if name == "fdn_ginsc_res34":         return FDNGISCResNet("34",  **kw)
+    if name == "fdn_ginsc_res50":         return FDNGISCResNet("50",  **kw)
+    if name == "fdn_ginsc_res101":        return FDNGISCResNet("101", **kw)
+    if name == "fdn_ginsc_convnext_tiny": return FDNGISCConvNeXt("tiny", **kw)
+    if name == "fdn_ginsc_convnext_base": return FDNGISCConvNeXt("base", **kw)
+    if name == "fdn_ginsc_effnet_b0":     return FDNGISCEfficientNet("b0", **kw)
+    if name == "fdn_ginsc_effnet_b4":     return FDNGISCEfficientNet("b4", **kw)
 
     # ── ShapeBiasNet ──────────────────────────────────────────
     if name == "shape_custom":        return ShapeBiasNet("custom",        **kw)

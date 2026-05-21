@@ -32,14 +32,28 @@
 #     insc_convnext_tiny / insc_convnext_base
 #     insc_effnet_b0 / insc_effnet_b4
 #
-#   FDN+INSC  ★ main contribution — combined model
-#     Both FDN and INSC applied together. Complementary: FDN acts on conv output
-#     (normalizes where corruptions corrupt), INSC acts on skip path (blocks
-#     the corruption highway). Together: frequency-aware feature normalization +
-#     shape-regularized skip connections.
+#   FDN+INSC  (full INSC — works on shallow nets, unstable on deep):
+#     Both FDN and INSC applied together. Full IN on every skip connection.
+#     Results: fdn_insc_res50 → 84.16% clean / 48.15% mCA ✓
+#              fdn_insc_res101 → 80.74% clean / 44.55% mCA ✗ (deep instability)
 #     fdn_insc_res18 / fdn_insc_res34 / fdn_insc_res50 / fdn_insc_res101
 #     fdn_insc_convnext_tiny / fdn_insc_convnext_base
 #     fdn_insc_effnet_b0 / fdn_insc_effnet_b4
+#
+#   FDN+GINSC  ★ main contribution — Gated INSC (learnable per-block gate)
+#     Replaces fixed INSC with a learnable scalar gate g=sigmoid(param) per block:
+#       out = (1-g)·identity + g·IN(identity)
+#     Gate initialized to sigmoid(-3)≈0.047 → starts as standard ResNet.
+#     Network learns WHERE texture stripping is beneficial:
+#       shallow layers → g≈0 (preserve spatial structure)
+#       deep layers    → g≈1 (strip texture for shape-based representations)
+#     Architecture-agnostic: handles ResNet, ConvNeXt, EfficientNet.
+#     Near-zero overhead. Fixes the deep-network instability of full INSC.
+#     Interpretable: learned gate values visualize the texture-shape hierarchy.
+#     ginsc_res18 / ginsc_res34 / ginsc_res50 / ginsc_res101  (GINSC only)
+#     fdn_ginsc_res18 / fdn_ginsc_res34 / fdn_ginsc_res50 / fdn_ginsc_res101
+#     fdn_ginsc_convnext_tiny / fdn_ginsc_convnext_base
+#     fdn_ginsc_effnet_b0 / fdn_ginsc_effnet_b4
 #
 #   PMCONV-L  (pmconv-scale branch — reference, +2.14% mCA on res101)
 #     Per-channel Lorentzian PM anisotropic diffusion before every Conv2d.
@@ -61,12 +75,20 @@
 #
 # ── Run groups ───────────────────────────────────────────────────────────
 #
-#   FDN+INSC (main contribution — run first):
-#     fdn_insc_res50    : baseline_res50    + fdn_insc_res50
-#     fdn_insc_res101   : baseline_res101   + fdn_insc_res101
-#     fdn_insc_convnext : baseline_convnext_tiny + fdn_insc_convnext_tiny
-#     fdn_insc_effnet   : baseline_efficientnet_b4 + fdn_insc_effnet_b4
-#     fdn_insc_all      : all four backbone pairs
+#   FDN+GINSC (main contribution — run these):
+#     fdn_ginsc_res50    : baseline_res50    + fdn_ginsc_res50
+#     fdn_ginsc_res101   : baseline_res101   + fdn_ginsc_res101
+#     fdn_ginsc_convnext : baseline_convnext_tiny + fdn_ginsc_convnext_tiny
+#     fdn_ginsc_effnet   : baseline_efficientnet_b4 + fdn_ginsc_effnet_b4
+#     fdn_ginsc_all      : all four backbone pairs
+#
+#   Gate ablation (full INSC vs gated INSC):
+#     ablation_gate_res50  : baseline + fdn_insc_res50  + fdn_ginsc_res50
+#     ablation_gate_res101 : baseline + fdn_insc_res101 + fdn_ginsc_res101
+#
+#   FDN+INSC (full INSC — reference, already run):
+#     fdn_insc_res50 ✓ / fdn_insc_res101 ✓ / fdn_insc_convnext / fdn_insc_effnet
+#     fdn_insc_all
 #
 #   FDN ablation (FDN only):
 #     fdn_res50 / fdn_res101 / fdn_convnext / fdn_effnet / fdn_all
@@ -100,13 +122,13 @@
 #   backoffLimit=0 — fail fast, investigate manually  ✓
 #
 # Submit:  kubectl apply -f combined-job.yaml
-# Logs:    kubectl logs -f job/fdn-insc-res101-img -n kc-ai-research-lab
-# Delete:  kubectl delete job fdn-insc-res101-img -n kc-ai-research-lab
+# Logs:    kubectl logs -f job/fdn-ginsc-res101-img -n kc-ai-research-lab
+# Delete:  kubectl delete job fdn-ginsc-res101-img -n kc-ai-research-lab
 # ─────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fdn-insc-res101-img
+  name: fdn-ginsc-res101-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -168,7 +190,7 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       fdn_insc_res101 \
+                --model       fdn_ginsc_res101 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -182,7 +204,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       fdn_insc_res101 \
+                --model       fdn_ginsc_res101 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

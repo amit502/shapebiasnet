@@ -159,6 +159,18 @@ GROUPS = {
                             "insc_res50",      "fdn_insc_res50"],
     "ablation_fn_res101":  ["baseline_res101", "fdn_res101",
                             "insc_res101",     "fdn_insc_res101"],
+    # ── Gated INSC (learnable gate per block) ─────────────────
+    "fdn_ginsc_res50":     ["baseline_res50",    "fdn_ginsc_res50"],
+    "fdn_ginsc_res101":    ["baseline_res101",   "fdn_ginsc_res101"],
+    "fdn_ginsc_convnext":  ["baseline_convnext_tiny", "fdn_ginsc_convnext_tiny"],
+    "fdn_ginsc_effnet":    ["baseline_efficientnet_b4", "fdn_ginsc_effnet_b4"],
+    "fdn_ginsc_all":       ["baseline_res50",            "fdn_ginsc_res50",
+                            "baseline_res101",           "fdn_ginsc_res101",
+                            "baseline_convnext_tiny",    "fdn_ginsc_convnext_tiny",
+                            "baseline_efficientnet_b4",  "fdn_ginsc_effnet_b4"],
+    # ── Ablation: fdn_insc vs fdn_ginsc ───────────────────────
+    "ablation_gate_res50":  ["baseline_res50",  "fdn_insc_res50",  "fdn_ginsc_res50"],
+    "ablation_gate_res101": ["baseline_res101", "fdn_insc_res101", "fdn_ginsc_res101"],
 }
 
 # ──────────────────────────────────────────────────────────────

@@ -1091,6 +1091,8 @@ class FDN(nn.Module):
         self.in_ = nn.InstanceNorm2d(num_features, eps=eps, affine=affine)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[2] <= 4:
+            return self.bn(x)
         x_lf = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
         x_hf = x - x_lf
         return self.bn(x_lf) + self.in_(x_hf)

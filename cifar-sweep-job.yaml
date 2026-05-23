@@ -1,0 +1,201 @@
+# cifar-sweep-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Sequential sweep: all non-baseline res18/res50 models
+# on CIFAR-10 and CIFAR-100, across seeds 42 / 23 / 17.
+#
+# Each model trains and evals independently — results saved exactly
+# as if each model were run as a standalone job.
+#
+# Models (8 total):
+#   fdn_ginsc_res18 / fdn_ginsc_res50   <- main contribution
+#   ginsc_res18     / ginsc_res50       <- GINSC only (no FDN)
+#   fdn_res18       / fdn_res50         <- FDN only (no GINSC)
+#   fdn_insc_res18  / fdn_insc_res50    <- full INSC (ablation)
+#
+# Datasets: cifar10 / cifar100
+# Seeds:    42 / 23 / 17
+# Total runs: 8 models x 2 datasets x 3 seeds = 48 sequential runs
+#
+# Results layout on PVC:
+#   /pvc/results/seed-42/fdn_ginsc_res50_cifar10_results.json
+#   /pvc/results/seed-42/fdn_ginsc_res50_cifar10_report.txt
+#   /pvc/results/seed-23/...
+#   ...
+#
+# Checkpoint layout:
+#   /pvc/checkpoints/seed-42/fdn_ginsc_res50_cifar10.pt
+#   ...
+#
+# Estimated runtime: ~30-40 min per run x 48 = 24-32 hours total
+# Individual failures are logged and skipped — job continues.
+#
+# Nautilus resource policy:
+#   CPU  request=3, limit=3
+#   RAM  request=9Gi, limit=10Gi
+#   GPU  request=1, limit=1
+#   backoffLimit=0
+#
+# Submit:  kubectl apply -f cifar-sweep-job.yaml
+# Logs:    kubectl logs -f job/cifar-sweep-img -n kc-ai-research-lab
+# Delete:  kubectl delete job cifar-sweep-img -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cifar-sweep-img
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      # - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-RTX-5000-Ada-Generation
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              # ── Step 0: Clone repo ────────────────────────────
+              echo "=========================================="
+              echo "  Step 0: Cloning repo (branch: freq-norm)"
+              echo "=========================================="
+              apt-get update -qq && apt-get install -y -qq git
+              git clone \
+                --branch freq-norm \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              # ── Step 1: Dependencies ──────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 1: Installing dependencies"
+              echo "=========================================="
+              pip install -r requirements.txt --quiet
+
+              # ── Setup complete — disable exit-on-error for sweep ──
+              set +e
+
+              MODELS="fdn_ginsc_res18 fdn_ginsc_res50 ginsc_res18 ginsc_res50 fdn_res18 fdn_res50 fdn_insc_res18 fdn_insc_res50"
+              SEEDS="42 23 17"
+              PASS=0
+              FAIL=0
+
+              for SEED in $SEEDS; do
+                for DATASET in cifar10 cifar100; do
+
+                  DATA_DIR="/pvc/${DATASET}"
+                  CKPT_DIR="/pvc/checkpoints/seed-${SEED}"
+                  RESULTS_DIR="/pvc/results/seed-${SEED}"
+                  mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
+
+                  for MODEL in $MODELS; do
+                    echo ""
+                    echo "============================================================"
+                    echo "  MODEL=$MODEL  DATASET=$DATASET  SEED=$SEED"
+                    echo "============================================================"
+
+                    # ── Train ──────────────────────────────────────────
+                    python -u train.py \
+                      --model      $MODEL \
+                      --dataset    $DATASET \
+                      --data_dir   $DATA_DIR \
+                      --ckpt_dir   $CKPT_DIR \
+                      --epochs     40 \
+                      --batch      128 \
+                      --workers    4 \
+                      --seed       $SEED
+                    TRAIN_STATUS=$?
+
+                    if [ $TRAIN_STATUS -ne 0 ]; then
+                      echo "  [ERROR] Training failed for $MODEL $DATASET seed=$SEED — skipping eval."
+                      FAIL=$((FAIL + 1))
+                      continue
+                    fi
+
+                    # ── Eval ───────────────────────────────────────────
+                    python -u eval.py \
+                      --model       $MODEL \
+                      --dataset     $DATASET \
+                      --data_dir    $DATA_DIR \
+                      --ckpt_dir    $CKPT_DIR \
+                      --results_dir $RESULTS_DIR \
+                      --batch       128 \
+                      --workers     4
+                    EVAL_STATUS=$?
+
+                    if [ $EVAL_STATUS -ne 0 ]; then
+                      echo "  [WARN] Eval failed for $MODEL $DATASET seed=$SEED"
+                      FAIL=$((FAIL + 1))
+                    else
+                      PASS=$((PASS + 1))
+                      echo "  [OK] $MODEL $DATASET seed=$SEED done."
+                    fi
+
+                  done
+                done
+              done
+
+              # ── Summary ───────────────────────────────────────
+              echo ""
+              echo "============================================================"
+              echo "  Sweep complete.  Passed: $PASS   Failed: $FAIL"
+              echo "============================================================"
+              ls /pvc/results/
+
+          resources:
+            requests:
+              cpu: "3"
+              memory: "9Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "3"
+              memory: "10Gi"
+              nvidia.com/gpu: "1"
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

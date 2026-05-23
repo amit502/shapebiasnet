@@ -1,0 +1,158 @@
+# cifar-downloader-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Downloads CIFAR-10, CIFAR-100, CIFAR-10-C, CIFAR-100-C to PVC.
+# Skips steps already completed — safe to resubmit after interruption.
+#
+# PVC layout after completion:
+#   /pvc/cifar10/                     <- CIFAR-10 (torchvision root)
+#   /pvc/cifar10/CIFAR-10-C/          <- 15 corruptions x .npy + labels.npy
+#   /pvc/cifar100/                    <- CIFAR-100 (torchvision root)
+#   /pvc/cifar100/CIFAR-100-C/        <- 15 corruptions x .npy + labels.npy
+#
+# Sources:
+#   CIFAR-10 / CIFAR-100  : torchvision (auto-download, ~170MB each)
+#   CIFAR-10-C            : zenodo.org/records/2535967  (~2.5GB)
+#   CIFAR-100-C           : zenodo.org/records/3555552  (~2.5GB)
+#
+# Nautilus resource policy:
+#   CPU  request=2, limit=2
+#   RAM  request=6Gi, limit=6Gi
+#   No GPU needed
+#   backoffLimit=0 — fail fast, investigate manually
+#
+# Submit:  kubectl apply -f cifar-downloader-job.yaml
+# Logs:    kubectl logs -f job/cifar-downloader -n kc-ai-research-lab
+# Delete:  kubectl delete job cifar-downloader -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cifar-downloader
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: downloader
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              apt-get update -qq && apt-get install -y -qq aria2
+
+              mkdir -p /pvc/cifar10 /pvc/cifar100
+
+              # ── Step 1: CIFAR-10 and CIFAR-100 via torchvision ───────
+              echo "=========================================="
+              echo "  Step 1: CIFAR-10 + CIFAR-100 (torchvision)"
+              echo "=========================================="
+              python3 -c "import torchvision; torchvision.datasets.CIFAR10('/pvc/cifar10', train=True, download=True); torchvision.datasets.CIFAR10('/pvc/cifar10', train=False, download=True); torchvision.datasets.CIFAR100('/pvc/cifar100', train=True, download=True); torchvision.datasets.CIFAR100('/pvc/cifar100', train=False, download=True); print('CIFAR-10 and CIFAR-100 ready.')"
+
+              # ── Step 2: CIFAR-10-C ────────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 2: CIFAR-10-C (Zenodo 2535967, ~2.5GB)"
+              echo "=========================================="
+              if [ -d /pvc/cifar10/CIFAR-10-C ]; then
+                echo "  [SKIP] CIFAR-10-C already exists."
+              else
+                echo "  Downloading CIFAR-10-C.tar..."
+                aria2c \
+                  --max-connection-per-server=8 \
+                  --split=8 \
+                  --min-split-size=50M \
+                  --continue=true \
+                  --max-tries=0 \
+                  --retry-wait=10 \
+                  --dir=/pvc/cifar10 \
+                  --out=CIFAR-10-C.tar \
+                  "https://zenodo.org/records/2535967/files/CIFAR-10-C.tar"
+                echo "  Extracting..."
+                tar -xf /pvc/cifar10/CIFAR-10-C.tar -C /pvc/cifar10/
+                rm /pvc/cifar10/CIFAR-10-C.tar
+                echo "  CIFAR-10-C done."
+              fi
+
+              # ── Step 3: CIFAR-100-C ───────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 3: CIFAR-100-C (Zenodo 3555552, ~2.5GB)"
+              echo "=========================================="
+              if [ -d /pvc/cifar100/CIFAR-100-C ]; then
+                echo "  [SKIP] CIFAR-100-C already exists."
+              else
+                echo "  Downloading CIFAR-100-C.tar..."
+                aria2c \
+                  --max-connection-per-server=8 \
+                  --split=8 \
+                  --min-split-size=50M \
+                  --continue=true \
+                  --max-tries=0 \
+                  --retry-wait=10 \
+                  --dir=/pvc/cifar100 \
+                  --out=CIFAR-100-C.tar \
+                  "https://zenodo.org/records/3555552/files/CIFAR-100-C.tar"
+                echo "  Extracting..."
+                tar -xf /pvc/cifar100/CIFAR-100-C.tar -C /pvc/cifar100/
+                rm /pvc/cifar100/CIFAR-100-C.tar
+                echo "  CIFAR-100-C done."
+              fi
+
+              # ── Verify ────────────────────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Verification"
+              echo "=========================================="
+              CORRUPTIONS="brightness contrast defocus_blur elastic_transform fog frost gaussian_noise glass_blur impulse_noise jpeg_compression motion_blur pixelate shot_noise snow zoom_blur"
+
+              MISSING=0
+              for C in $CORRUPTIONS; do
+                if [ ! -f /pvc/cifar10/CIFAR-10-C/${C}.npy ]; then
+                  echo "  [MISSING] CIFAR-10-C: $C"
+                  MISSING=$((MISSING + 1))
+                fi
+                if [ ! -f /pvc/cifar100/CIFAR-100-C/${C}.npy ]; then
+                  echo "  [MISSING] CIFAR-100-C: $C"
+                  MISSING=$((MISSING + 1))
+                fi
+              done
+
+              if [ "$MISSING" -ne 0 ]; then
+                echo "  $MISSING files missing — check logs above."
+                exit 1
+              fi
+
+              echo "  All corruptions verified."
+              echo ""
+              echo "=========================================="
+              echo "  Done. PVC usage:"
+              echo "=========================================="
+              du -sh /pvc/cifar10/ /pvc/cifar100/
+              df -h /pvc
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+            limits:
+              cpu: "2"
+              memory: "6Gi"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

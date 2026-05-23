@@ -128,7 +128,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fdn-ginsc-res101-img
+  name: fdn-ginsc-effnet-b4-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -190,13 +190,13 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       fdn_ginsc_res101 \
+                --model       fdn_ginsc_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --epochs      50 \
                 --batch       64 \
-                --workers     8
+                --workers     8 
 
               # ── Step 3: Full Evaluation (clean + corruption) ──
               echo ""
@@ -204,7 +204,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       fdn_ginsc_res101 \
+                --model       fdn_ginsc_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

@@ -5,7 +5,7 @@
 #
 # Each model trains and evals independently — results saved exactly
 # as if each model were run as a standalone job.
-#
+# MODELS="fdn_ginsc_res18 fdn_ginsc_res50 ginsc_res18 ginsc_res50 fdn_res18 fdn_res50 fdn_insc_res18 fdn_insc_res50"
 # Models (8 total):
 #   fdn_ginsc_res18 / fdn_ginsc_res50   <- main contribution
 #   ginsc_res18     / ginsc_res50       <- GINSC only (no FDN)
@@ -92,7 +92,7 @@ spec:
               # ── Setup complete — disable exit-on-error for sweep ──
               set +e
 
-              MODELS="fdn_ginsc_res18 fdn_ginsc_res50 ginsc_res18 ginsc_res50 fdn_res18 fdn_res50 fdn_insc_res18 fdn_insc_res50"
+              MODELS="fdn_ginsc_res18 fdn_ginsc_res50"
               SEEDS="42 23 17"
               PASS=0
               FAIL=0

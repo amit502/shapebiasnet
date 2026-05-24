@@ -1107,6 +1107,8 @@ class PAConv(nn.Module):
         X       = fft2(x)
         x_phase = ifft2(X / |X|).real          # structural signal (phase only)
         x_amp   = ifft2(|X|).real              # energy signal (amplitude only)
+        # normalize to x's per-spatial std (Parseval: std(x_phase)~1/sqrt(HW))
+        x_phase, x_amp = rescale_to(x_phase, x), rescale_to(x_amp, x)
         x_aug   = x + g_p·(x_phase−x) + g_a·(x_amp−x)
         out     = conv(x_aug)
 
@@ -1131,6 +1133,11 @@ class PAConv(nn.Module):
         mag     = X.abs().clamp(min=1e-8)
         x_phase = torch.fft.ifft2(X / mag).real
         x_amp   = torch.fft.ifft2(mag.to(dtype=X.dtype)).real
+        # x_phase has std ~ 1/sqrt(H*W) by Parseval; x_amp scale also differs.
+        # Normalize both to match x's per-spatial std so gates blend at equal scale.
+        x_std   = x.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+        x_phase = x_phase * (x_std / x_phase.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8))
+        x_amp   = x_amp   * (x_std / x_amp.std(dim=(-2, -1),   keepdim=True).clamp(min=1e-8))
         g_p     = torch.sigmoid(self.raw_gp)
         g_a     = torch.sigmoid(self.raw_ga)
         x_aug   = x + g_p * (x_phase - x) + g_a * (x_amp - x)

@@ -1116,6 +1116,185 @@ def make_fdn(model: nn.Module) -> nn.Module:
 
 
 # ─────────────────────────────────────────────────────────────
+#  SPECTRAL DECOUPLED NORMALIZATION (SDN)
+#
+#  Drop-in BatchNorm2d replacement. Same idea as FDN but uses an
+#  exact Fourier decomposition instead of AvgPool approximation:
+#
+#    X     = fft2(x)
+#    mask  = Gaussian(H, W, σ)      — learnable per-layer bandwidth
+#    x_lf  = ifft2(X · mask).real   — low-freq  (shape / structure)
+#    x_hf  = ifft2(X · (1−mask)).real — high-freq (texture / noise)
+#    out   = BN(x_lf) + IN(x_hf)
+#
+#  Why better than FDN:
+#    FDN uses AvgPool(k=3) for LF/HF split. On small feature maps
+#    (CIFAR layer3 = 8×8, layer4 = 4×4) the 3×3 kernel covers most
+#    of the map → x_lf ≈ mean(x), x_hf ≈ 0. FDN is a no-op there.
+#    SDN's FFT decomposition is exact at any resolution — 4×4 has
+#    16 genuine frequency components, all properly separated.
+#
+#  Learnable σ (log-parameterized, one scalar per layer):
+#    Shallow layers tend to keep σ large (preserve fine detail in LF).
+#    Deep layers may shrink σ (only coarsest structure in LF).
+#    Init: σ = 0.25 — similar bandwidth to FDN's AvgPool(k=3).
+#
+#  Overhead: 2 FFT calls + Gaussian mask per BN layer. Mask is
+#  recomputed each forward pass but is O(H·W) — negligible vs conv.
+# ─────────────────────────────────────────────────────────────
+
+class SDN(nn.Module):
+    """
+    Spectral Decoupled Normalization: drop-in BatchNorm2d replacement.
+
+        X     = fft2(x)
+        mask  = exp(−(u²+v²) / 2σ²)   Gaussian low-pass, σ learnable
+        x_lf  = ifft2(X · mask).real
+        x_hf  = ifft2(X · (1−mask)).real
+        out   = BN(x_lf) + IN(x_hf)
+
+    Works at any resolution including CIFAR's 4×4 feature maps where
+    FDN's AvgPool degenerates. σ is log-parameterized per layer so
+    each BN site learns its own LF/HF frequency boundary.
+    """
+    def __init__(self, num_features: int, eps: float = 1e-5,
+                 momentum: float = 0.1, affine: bool = True):
+        super().__init__()
+        self.bn       = nn.BatchNorm2d(num_features, eps=eps,
+                                       momentum=momentum, affine=affine)
+        self.in_      = nn.InstanceNorm2d(num_features, eps=eps, affine=affine)
+        # log σ init → σ ≈ 0.25, similar cutoff to FDN's AvgPool k=3
+        self.log_sigma = nn.Parameter(torch.tensor(math.log(0.25)))
+
+    def _mask(self, H: int, W: int, device: torch.device) -> torch.Tensor:
+        fh = torch.fft.fftfreq(H, device=device)   # (H,)
+        fw = torch.fft.fftfreq(W, device=device)   # (W,)
+        gh, gw = torch.meshgrid(fh, fw, indexing='ij')   # (H, W)
+        sigma  = self.log_sigma.exp()
+        return torch.exp(-(gh ** 2 + gw ** 2) / (2 * sigma ** 2))  # (H, W)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        H, W  = x.shape[2], x.shape[3]
+        X     = torch.fft.fft2(x)                        # (B, C, H, W) complex
+        mask  = self._mask(H, W, x.device)               # (H, W) real
+        x_lf  = torch.fft.ifft2(X * mask).real
+        x_hf  = torch.fft.ifft2(X * (1.0 - mask)).real
+        return self.bn(x_lf) + self.in_(x_hf)
+
+
+def make_sdn(model: nn.Module) -> nn.Module:
+    """Replace every BatchNorm2d in model with SDN (in-place, recursive)."""
+    for name, module in model.named_children():
+        if isinstance(module, nn.BatchNorm2d):
+            sdn = SDN(module.num_features, module.eps,
+                      module.momentum, module.affine)
+            sdn.bn.running_mean.copy_(module.running_mean)
+            sdn.bn.running_var.copy_(module.running_var)
+            if module.affine:
+                sdn.bn.weight.data.copy_(module.weight.data)
+                sdn.bn.bias.data.copy_(module.bias.data)
+            setattr(model, name, sdn)
+        else:
+            make_sdn(module)
+    return model
+
+
+# ─────────────────────────────────────────────────────────────
+#  BACKBONE WRAPPERS  (SDN — freq-norm branch)
+# ─────────────────────────────────────────────────────────────
+
+class SDNResNet(nn.Module):
+    """ResNet with all BatchNorm2d replaced by SDN (exact FFT freq split)."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_sdn(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class SDNGISCResNet(nn.Module):
+    """ResNet with SDN on all BN layers and Gated INSC on all skip connections."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        make_sdn(net)
+        make_ginsc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class SDNGISCConvNeXt(nn.Module):
+    """ConvNeXt with Gated INSC on all skip connections. SDN is a no-op (no BN2d)."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        builders = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in builders
+        net = builders[size](weights=None)
+        net.classifier[-1] = nn.Linear(net.classifier[-1].in_features, num_classes)
+        make_ginsc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class SDNEfficientNet(nn.Module):
+    """EfficientNet with all BatchNorm2d replaced by SDN."""
+    def __init__(self, size: str = "b0", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_sdn(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class SDNGISCEfficientNet(nn.Module):
+    """EfficientNet with SDN on BN layers and Gated INSC on MBConv skips."""
+    def __init__(self, size: str = "b0", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        make_sdn(net)
+        make_ginsc(net)
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+# ─────────────────────────────────────────────────────────────
 #  INSTANCE-NORMALIZED SKIP CONNECTIONS (INSC)
 #
 #  Patches every residual block to apply IN to the shortcut
@@ -2147,6 +2326,24 @@ MODEL_NAMES = [
     "robustconv_convnext_base",   # ImageNet only
     "robustconv_effnet_b0",       # ImageNet only
     "robustconv_effnet_b4",       # ImageNet only
+    # ── SDN (Spectral Decoupled Normalization — freq-norm branch) ────────
+    # Drop-in BN replacement using exact FFT Gaussian mask split.
+    # Fixes FDN's AvgPool degeneracy on small CIFAR feature maps.
+    # ConvNeXt: SDN is a no-op (LayerNorm, not BN2d) — GINSC only.
+    "sdn_res18",                  # CIFAR + ImageNet
+    "sdn_res34",                  # CIFAR + ImageNet
+    "sdn_res50",                  # CIFAR + ImageNet
+    "sdn_res101",                 # CIFAR + ImageNet
+    "sdn_effnet_b0",              # ImageNet only
+    "sdn_effnet_b4",              # ImageNet only
+    "sdn_ginsc_res18",            # CIFAR + ImageNet
+    "sdn_ginsc_res34",            # CIFAR + ImageNet
+    "sdn_ginsc_res50",            # CIFAR + ImageNet  ★ main CIFAR contribution
+    "sdn_ginsc_res101",           # CIFAR + ImageNet
+    "sdn_ginsc_convnext_tiny",    # ImageNet only (SDN no-op; GINSC only)
+    "sdn_ginsc_convnext_base",    # ImageNet only (SDN no-op; GINSC only)
+    "sdn_ginsc_effnet_b0",        # ImageNet only
+    "sdn_ginsc_effnet_b4",        # ImageNet only  ★ main ImageNet contribution
     # ── FDN (Frequency-Decoupled Normalization — freq-norm branch) ──────
     "fdn_res18",              # CIFAR + ImageNet
     "fdn_res34",              # CIFAR + ImageNet
@@ -2258,6 +2455,22 @@ def build_model(name: str,
     if name == "robustconv_convnext_base": return RobustConvNeXt("base", **kw)
     if name == "robustconv_effnet_b0":     return RobustEfficientNet("b0", **kw)
     if name == "robustconv_effnet_b4":     return RobustEfficientNet("b4", **kw)
+
+    # ── SDN ───────────────────────────────────────────────────
+    if name == "sdn_res18":               return SDNResNet("18",  **kw)
+    if name == "sdn_res34":               return SDNResNet("34",  **kw)
+    if name == "sdn_res50":               return SDNResNet("50",  **kw)
+    if name == "sdn_res101":              return SDNResNet("101", **kw)
+    if name == "sdn_effnet_b0":           return SDNEfficientNet("b0", **kw)
+    if name == "sdn_effnet_b4":           return SDNEfficientNet("b4", **kw)
+    if name == "sdn_ginsc_res18":         return SDNGISCResNet("18",  **kw)
+    if name == "sdn_ginsc_res34":         return SDNGISCResNet("34",  **kw)
+    if name == "sdn_ginsc_res50":         return SDNGISCResNet("50",  **kw)
+    if name == "sdn_ginsc_res101":        return SDNGISCResNet("101", **kw)
+    if name == "sdn_ginsc_convnext_tiny": return SDNGISCConvNeXt("tiny", **kw)
+    if name == "sdn_ginsc_convnext_base": return SDNGISCConvNeXt("base", **kw)
+    if name == "sdn_ginsc_effnet_b0":     return SDNGISCEfficientNet("b0", **kw)
+    if name == "sdn_ginsc_effnet_b4":     return SDNGISCEfficientNet("b4", **kw)
 
     # ── FDN ───────────────────────────────────────────────────
     if name == "fdn_res18":          return FDNResNet("18",  **kw)

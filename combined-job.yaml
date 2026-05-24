@@ -32,6 +32,15 @@
 #     insc_convnext_tiny / insc_convnext_base
 #     insc_effnet_b0 / insc_effnet_b4
 #
+#   SDN  ★ this branch (freq-norm) — Spectral Decoupled Normalization
+#     Replaces FDN's AvgPool split with an exact FFT Gaussian mask:
+#       mask = exp(-(u²+v²)/2σ²)  (unshifted FFT grid, learnable σ per layer)
+#     x_lf = ifft(X·mask),  x_hf = ifft(X·(1-mask))
+#     Same output: BN(x_lf) + IN(x_hf). Fixes FDN degeneracy at CIFAR 4×4 maps.
+#     ResNet only (CIFAR + ImageNet):
+#     sdn_res18 / sdn_res34 / sdn_res50 / sdn_res101  (SDN only)
+#     sdn_ginsc_res18 / sdn_ginsc_res34 / sdn_ginsc_res50 / sdn_ginsc_res101  ★
+#
 #   FDN+INSC  (full INSC — works on shallow nets, unstable on deep):
 #     Both FDN and INSC applied together. Full IN on every skip connection.
 #     Results: fdn_insc_res50 → 84.16% clean / 48.15% mCA ✓
@@ -128,7 +137,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fdn-ginsc-effnet-b4-img
+  name: sdn-ginsc-effnet-b4-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -190,13 +199,13 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       fdn_ginsc_effnet_b4 \
+                --model       sdn_ginsc_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --epochs      50 \
                 --batch       64 \
-                --workers     8 
+                --workers     8
 
               # ── Step 3: Full Evaluation (clean + corruption) ──
               echo ""
@@ -204,7 +213,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       fdn_ginsc_effnet_b4 \
+                --model       sdn_ginsc_effnet_b4 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

@@ -17,7 +17,12 @@
 #     insc_res18 / insc_res34 / insc_res50 / insc_res101
 #     fdn_insc_res18 / fdn_insc_res34 / fdn_insc_res50 / fdn_insc_res101
 #
-#   FDN+GINSC  ★ main contribution (learnable gated skip normalization):
+#   SDN (Spectral Decoupled Normalization — fixes FDN on CIFAR small maps):
+#     Exact FFT Gaussian mask split; learnable σ per BN layer. Works on 4×4 maps.
+#     sdn_res18 / sdn_res34 / sdn_res50 / sdn_res101
+#     sdn_ginsc_res18 / sdn_ginsc_res34 / sdn_ginsc_res50 / sdn_ginsc_res101  ★
+#
+#   FDN+GINSC (FDN ablation — broken on CIFAR due to AvgPool degeneracy):
 #     ginsc_res18 / ginsc_res34 / ginsc_res50 / ginsc_res101
 #     fdn_ginsc_res18 / fdn_ginsc_res34 / fdn_ginsc_res50 / fdn_ginsc_res101
 #
@@ -25,6 +30,9 @@
 #     shape_custom / shape_res18 / shape_res34 / shape_res50 / shape_res101
 #
 # ── Run groups (defined in train.py) ────────────────────────────────────
+#   SDN (main CIFAR contribution):
+#     sdn_ginsc_res50  : baseline_res50 + sdn_ginsc_res50
+#     sdn_ginsc_res101 : baseline_res101 + sdn_ginsc_res101
 #   cifar_all          : all baseline + shape models (legacy)
 #   fdn_ginsc_res50    : baseline_res50 + fdn_ginsc_res50
 #   fdn_ginsc_res101   : baseline_res101 + fdn_ginsc_res101
@@ -57,7 +65,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fdn-ginsc-res50-cifar10-img
+  name: sdn-ginsc-res50-cifar10-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -119,7 +127,7 @@ spec:
               echo "  Step 2: Training (CIFAR-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       fdn_ginsc_res50 \
+                --model       sdn_ginsc_res50 \
                 --dataset     cifar10 \
                 --data_dir    /pvc/cifar10 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -130,10 +138,10 @@ spec:
               # ── Step 3: Full Evaluation (clean + corruption) ──
               echo ""
               echo "=========================================="
-              echo "  Step 3: Full Evaluation (CIFAR-100 test + CIFAR-100-C)"
+              echo "  Step 3: Full Evaluation (CIFAR-10 test + CIFAR-10-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       fdn_ginsc_res50 \
+                --model       sdn_ginsc_res50 \
                 --dataset     cifar10 \
                 --data_dir    /pvc/cifar10 \
                 --ckpt_dir    /pvc/checkpoints \

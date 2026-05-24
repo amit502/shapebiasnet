@@ -65,7 +65,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: sdn-ginsc-res50-cifar10-img
+  name: sdn-ginsc-res50-cifar100-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -128,8 +128,8 @@ spec:
               echo "=========================================="
               python -u train.py \
                 --model       sdn_ginsc_res50 \
-                --dataset     cifar10 \
-                --data_dir    /pvc/cifar10 \
+                --dataset     cifar100 \
+                --data_dir    /pvc/cifar100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --epochs      40 \
                 --batch       128 \
@@ -142,8 +142,8 @@ spec:
               echo "=========================================="
               python -u eval.py \
                 --model       sdn_ginsc_res50 \
-                --dataset     cifar10 \
-                --data_dir    /pvc/cifar10 \
+                --dataset     cifar100 \
+                --data_dir    /pvc/cifar100 \
                 --ckpt_dir    /pvc/checkpoints \
                 --results_dir /pvc/results \
                 --batch       128 \

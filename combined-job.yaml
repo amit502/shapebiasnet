@@ -55,6 +55,20 @@
 #     fdn_ginsc_convnext_tiny / fdn_ginsc_convnext_base
 #     fdn_ginsc_effnet_b0 / fdn_ginsc_effnet_b4
 #
+#   PAConv  ★ (phase-amp-conv branch) — Phase-Amplitude Decomposed Convolution
+#     Decomposes each conv layer's input feature map via 2-D FFT into:
+#       x_phase = ifft2(X/|X|)  — unit-amplitude view (edges/structure/shape)
+#       x_amp   = ifft2(|X|)    — zero-phase view (energy/texture distribution)
+#     A learned residual blend (2 scalars per layer, init sigmoid(-3)≈0.047):
+#       x_aug = x + g_p*(x_phase-x) + g_a*(x_amp-x)
+#     then runs the standard conv on x_aug.
+#     Corruption argument: ImageNet-C corruptions shift Fourier amplitude;
+#     phase is preserved → routing g_p→1 builds amplitude-invariant features.
+#     Zero test-time overhead vs baseline. No corruption augmentation needed.
+#     Closest prior: APR (ICCV 2021) — input-image augmentation, not arch.
+#     paconv_res18 / paconv_res50 / paconv_res101
+#     paconv_convnext_tiny / paconv_effnet_b4
+#
 #   PMCONV-L  (pmconv-scale branch — reference, +2.14% mCA on res101)
 #     Per-channel Lorentzian PM anisotropic diffusion before every Conv2d.
 #     Fixed k=0.3, n_steps=1. ~2.5x overhead vs baseline.

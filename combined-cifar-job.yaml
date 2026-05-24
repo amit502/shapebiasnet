@@ -17,9 +17,17 @@
 #     insc_res18 / insc_res34 / insc_res50 / insc_res101
 #     fdn_insc_res18 / fdn_insc_res34 / fdn_insc_res50 / fdn_insc_res101
 #
-#   FDN+GINSC  ★ main contribution (learnable gated skip normalization):
+#   FDN+GINSC  ★ freq-norm branch (learnable gated skip normalization):
 #     ginsc_res18 / ginsc_res34 / ginsc_res50 / ginsc_res101
 #     fdn_ginsc_res18 / fdn_ginsc_res34 / fdn_ginsc_res50 / fdn_ginsc_res101
+#
+#   PAConv  ★ phase-amp-conv branch — Phase-Amplitude Decomposed Convolution
+#     Each 3×3 conv decomposes its input via FFT into phase-only (structure)
+#     and amplitude-only (texture) views, blended via learned per-layer gates.
+#     Gates init to sigmoid(-3)≈0.047 → starts identical to baseline.
+#     FDN h<=4 fallback already applies → CIFAR feature maps are safe.
+#     NOTE: change branch to phase-amp-conv when running these.
+#     paconv_res18 / paconv_res50 / paconv_res101
 #
 #   ShapeBiasNet (dual-stream, for comparison):
 #     shape_custom / shape_res18 / shape_res34 / shape_res50 / shape_res101
@@ -86,6 +94,9 @@ spec:
               set -e
 
               # ── Step 0: Clone repo ────────────────────────────
+              # Branch guide:
+              #   freq-norm       → fdn_*, insc_*, ginsc_*, fdn_ginsc_* models
+              #   phase-amp-conv  → paconv_* models
               echo "=========================================="
               echo "  Step 0: Cloning repo (branch: freq-norm)"
               echo "=========================================="

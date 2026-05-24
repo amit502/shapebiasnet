@@ -1,16 +1,25 @@
 # cifar-sweep-job.yaml
 # ─────────────────────────────────────────────────────────────
-# Sequential sweep: all non-baseline res18/res50 models
+# Sequential sweep: non-baseline res18/res50 models
 # on CIFAR-10 and CIFAR-100, across seeds 42 / 23 / 17.
 #
 # Each model trains and evals independently — results saved exactly
 # as if each model were run as a standalone job.
-# MODELS="fdn_ginsc_res18 fdn_ginsc_res50 ginsc_res18 ginsc_res50 fdn_res18 fdn_res50 fdn_insc_res18 fdn_insc_res50"
-# Models (8 total):
-#   fdn_ginsc_res18 / fdn_ginsc_res50   <- main contribution
+#
+# Current sweep models (set in MODELS variable below):
+#   fdn_ginsc_res18 / fdn_ginsc_res50   <- main contribution (freq-norm branch)
 #   ginsc_res18     / ginsc_res50       <- GINSC only (no FDN)
 #   fdn_res18       / fdn_res50         <- FDN only (no GINSC)
 #   fdn_insc_res18  / fdn_insc_res50    <- full INSC (ablation)
+#
+# To run PAConv CIFAR sweep (phase-amp-conv branch), change:
+#   branch: phase-amp-conv
+#   MODELS="paconv_res18 paconv_res50 paconv_ginsc_res18 paconv_ginsc_res50"
+#
+# PAConv model summary:
+#   paconv_res18/50     — per-layer phase/amplitude routing, no GINSC
+#   paconv_ginsc_res18/50 — PAConv + gated IN on skip connections
+#   FDN adaptive fix (h<=4 threshold) already applied — CIFAR-safe.
 #
 # Datasets: cifar10 / cifar100
 # Seeds:    42 / 23 / 17

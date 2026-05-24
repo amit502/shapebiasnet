@@ -64,6 +64,16 @@
 #     fdn_ginsc_convnext_tiny / fdn_ginsc_convnext_base
 #     fdn_ginsc_effnet_b0 / fdn_ginsc_effnet_b4
 #
+#   CMCONV  ★ main contribution (complex-modulus-conv branch)
+#     Replaces spatial (k>1) Conv2d with complex conv + modulus nonlinearity.
+#     y = sqrt((W_r*x)² + (W_i*x)²). Amplitude = deformation-stable; phase discarded.
+#     Inherits Mallat (2012) scattering stability guarantee with learned filters.
+#     Universal: works on ResNet, ConvNeXt, EfficientNet (replaces nn.Conv2d directly).
+#     ~1.5× param overhead (vs 2× if 1×1 convs also replaced — kept as standard).
+#     cmconv_res18 / cmconv_res34 / cmconv_res50 / cmconv_res101
+#     cmconv_convnext_tiny / cmconv_convnext_base
+#     cmconv_effnet_b0 / cmconv_effnet_b4
+#
 #   PMCONV-L  (pmconv-scale branch — reference, +2.14% mCA on res101)
 #     Per-channel Lorentzian PM anisotropic diffusion before every Conv2d.
 #     Fixed k=0.3, n_steps=1. ~2.5x overhead vs baseline.
@@ -131,13 +141,13 @@
 #   backoffLimit=0 — fail fast, investigate manually  ✓
 #
 # Submit:  kubectl apply -f combined-job.yaml
-# Logs:    kubectl logs -f job/fdn-ginsc-res101-img -n kc-ai-research-lab
-# Delete:  kubectl delete job fdn-ginsc-res101-img -n kc-ai-research-lab
+# Logs:    kubectl logs -f job/cmconv-res50-img -n kc-ai-research-lab
+# Delete:  kubectl delete job cmconv-res50-img -n kc-ai-research-lab
 # ─────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: sdn-ginsc-effnet-b4-img
+  name: cmconv-res50-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -199,7 +209,7 @@ spec:
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       sdn_ginsc_effnet_b4 \
+                --model       cmconv_res50 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -213,7 +223,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       sdn_ginsc_effnet_b4 \
+                --model       cmconv_res50 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

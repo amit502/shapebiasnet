@@ -5,13 +5,11 @@
 #
 # Each model trains and evals independently — results saved exactly
 # as if each model were run as a standalone job.
-# MODELS="fdn_ginsc_res18 fdn_ginsc_res50 sdn_ginsc_res18 sdn_ginsc_res50 ginsc_res18 ginsc_res50 fdn_res18 fdn_res50 fdn_insc_res18 fdn_insc_res50"
-# Models (10 total):
-#   sdn_ginsc_res18 / sdn_ginsc_res50   <- ★ main CIFAR contribution (SDN+GINSC)
-#   fdn_ginsc_res18 / fdn_ginsc_res50   <- FDN+GINSC (ImageNet main; CIFAR ablation)
-#   ginsc_res18     / ginsc_res50       <- GINSC only (no FDN/SDN)
-#   fdn_res18       / fdn_res50         <- FDN only (no GINSC)
-#   fdn_insc_res18  / fdn_insc_res50    <- full INSC (ablation)
+# Models (8 total):
+#   cmconv_res18     / cmconv_res50      <- full quadrature (~1.5× FLOPs)
+#   cmconv_abs_res18 / cmconv_abs_res50  <- half-plane (1.0× FLOPs, ablation)
+#   sdn_ginsc_res18  / sdn_ginsc_res50   <- SDN+GINSC (freq-norm ablation)
+#   fdn_ginsc_res18  / fdn_ginsc_res50   <- FDN+GINSC (freq-norm ablation)
 #
 # Datasets: cifar10 / cifar100
 # Seeds:    42 / 23 / 17
@@ -93,7 +91,7 @@ spec:
               # ── Setup complete — disable exit-on-error for sweep ──
               set +e
 
-              MODELS="sdn_ginsc_res18 sdn_ginsc_res50 fdn_ginsc_res18 fdn_ginsc_res50"
+              MODELS="cmconv_res18 cmconv_res50 cmconv_abs_res18 cmconv_abs_res50 sdn_ginsc_res18 sdn_ginsc_res50 fdn_ginsc_res18 fdn_ginsc_res50"
               SEEDS="42 23 17"
               PASS=0
               FAIL=0

@@ -68,13 +68,13 @@
 #   backoffLimit=0 — fail fast, investigate manually
 #
 # Submit:  kubectl apply -f combined-cifar-job.yaml
-# Logs:    kubectl logs -f job/adsup-res50-cifar100-img -n kc-ai-research-lab
-# Delete:  kubectl delete job adsup-res50-cifar100-img -n kc-ai-research-lab
+# Logs:    kubectl logs -f job/sha-res50-cifar100-img -n kc-ai-research-lab
+# Delete:  kubectl delete job sha-res50-cifar100-img -n kc-ai-research-lab
 # ─────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: adsup-res50-cifar100-img
+  name: sha-res50-cifar100-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -136,7 +136,7 @@ spec:
               echo "  Step 2: Training (CIFAR-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       adsup_res50 \
+                --model       sha_res50 \
                 --dataset     cifar100 \
                 --data_dir    /pvc/cifar100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -150,7 +150,7 @@ spec:
               echo "  Step 3: Full Evaluation (CIFAR-100 test + CIFAR-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       adsup_res50 \
+                --model       sha_res50 \
                 --dataset     cifar100 \
                 --data_dir    /pvc/cifar100 \
                 --ckpt_dir    /pvc/checkpoints \

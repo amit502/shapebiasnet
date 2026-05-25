@@ -406,8 +406,19 @@ def train_model(name: str) -> float:
         model = nn.DataParallel(model)
 
     opt  = torch.optim.SGD(unwrap(model).parameters(), lr=args.lr,
-                           momentum=0.9, weight_decay=1e-4, nesterov=True)
-    sch  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
+                           momentum=0.9, weight_decay=5e-4, nesterov=True)
+    warmup_epochs = min(5, EPOCHS // 8)
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=EPOCHS - warmup_epochs)
+    sch = torch.optim.lr_scheduler.SequentialLR(
+        opt,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs),
+            cosine,
+        ],
+        milestones=[warmup_epochs],
+    )
     crit = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     start_ep = 1

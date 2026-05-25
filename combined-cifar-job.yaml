@@ -69,7 +69,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: cmconv-abs-res50-cifar100-img
+  name: cmconv-res50-cifar100-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -131,7 +131,7 @@ spec:
               echo "  Step 2: Training (CIFAR-100, clean data only)"
               echo "=========================================="
               python -u train.py \
-                --model       cmconv_abs_res50 \
+                --model       cmconv_res50 \
                 --dataset     cifar100 \
                 --data_dir    /pvc/cifar100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -145,7 +145,7 @@ spec:
               echo "  Step 3: Full Evaluation (CIFAR-10 test + CIFAR-10-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       cmconv_abs_res50 \
+                --model       cmconv_res50 \
                 --dataset     cifar100 \
                 --data_dir    /pvc/cifar100 \
                 --ckpt_dir    /pvc/checkpoints \

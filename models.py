@@ -1306,6 +1306,106 @@ class CMConvAbsEfficientNet(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
+#  SPATIAL VARIANCE SUPPRESSION (VarSupp)
+#
+#  Zero-parameter texture debiasing module inserted at stage boundaries.
+#
+#  Key insight: texture-sensitive channels have HIGH spatial variance
+#  (the texture pattern fires across the entire feature map), while
+#  structure-sensitive channels have LOW spatial variance (an "ear detector"
+#  fires in one place). Reweighting channels by inverse spatial variance
+#  automatically suppresses texture and amplifies structure.
+#
+#  Self-calibrating: corruptions increase spatial variance of texture
+#  channels further → stronger suppression → more shape-based classification.
+#
+#  Inserted once per residual stage (3–4 times per network). Zero learned
+#  parameters. Compute: one var() + one multiply per channel per stage.
+# ─────────────────────────────────────────────────────────────
+
+class VarSuppression(nn.Module):
+    """Inverse spatial-variance channel attention — zero parameters.
+
+    w_c = 1 / (1 + σ²_c / mean(σ²))   where σ²_c = var(F_c over H×W)
+
+    Weights are renormalized so their mean is 1 (preserves feature magnitude).
+    Skipped on feature maps ≤ 2×2 (too few spatial points for stable variance).
+    """
+    def __init__(self, eps: float = 1e-4):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4 or x.shape[-1] <= 2:
+            return x
+        var = x.var(dim=[-2, -1], keepdim=True, unbiased=False)        # (B,C,1,1)
+        mean_var = var.mean(dim=1, keepdim=True).clamp(min=self.eps)
+        w = 1.0 / (1.0 + var / mean_var)
+        w = w * (x.shape[1] / w.sum(dim=1, keepdim=True).clamp(min=self.eps))
+        return x * w
+
+
+class VarSuppResNet(nn.Module):
+    """ResNet with VarSuppression inserted after each residual stage."""
+    def __init__(self, depth: str = "50", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import resnet18, resnet34, resnet50, resnet101
+        nets = {"18": resnet18, "34": resnet34, "50": resnet50, "101": resnet101}
+        assert depth in nets
+        net = nets[depth](weights=None)
+        if "cifar" in dataset:
+            net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            net.maxpool = nn.Identity()
+        net.fc = nn.Linear(512 if depth in ("18", "34") else 2048, num_classes)
+        net.layer1 = nn.Sequential(net.layer1, VarSuppression())
+        net.layer2 = nn.Sequential(net.layer2, VarSuppression())
+        net.layer3 = nn.Sequential(net.layer3, VarSuppression())
+        net.layer4 = nn.Sequential(net.layer4, VarSuppression())
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class VarSuppConvNeXt(nn.Module):
+    """ConvNeXt with VarSuppression inserted after each stage."""
+    def __init__(self, size: str = "tiny", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import convnext_tiny, convnext_base
+        builders = {"tiny": convnext_tiny, "base": convnext_base}
+        assert size in builders
+        net = builders[size](weights=None)
+        net.classifier[-1] = nn.Linear(net.classifier[-1].in_features, num_classes)
+        # torchvision ConvNeXt: features[1,3,5,7] are the four stages
+        for i in [1, 3, 5, 7]:
+            net.features[i] = nn.Sequential(net.features[i], VarSuppression())
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class VarSuppEfficientNet(nn.Module):
+    """EfficientNet with VarSuppression inserted after each MBConv stage."""
+    def __init__(self, size: str = "b0", num_classes: int = 1000,
+                 dataset: str = "imagenet"):
+        super().__init__()
+        from torchvision.models import efficientnet_b0, efficientnet_b4
+        nets = {"b0": efficientnet_b0, "b4": efficientnet_b4}
+        assert size in nets
+        net = nets[size](weights=None, num_classes=num_classes)
+        # torchvision EfficientNet: features[1..7] are the MBConv stages
+        for i in range(1, 8):
+            net.features[i] = nn.Sequential(net.features[i], VarSuppression())
+        self.model = net
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+# ─────────────────────────────────────────────────────────────
 #  FREQUENCY-DECOUPLED NORMALIZATION (FDN)
 #
 #  Drop-in replacement for BatchNorm2d. Decomposes x into a
@@ -2577,6 +2677,17 @@ MODEL_NAMES = [
     "robustconv_convnext_base",   # ImageNet only
     "robustconv_effnet_b0",       # ImageNet only
     "robustconv_effnet_b4",       # ImageNet only
+    # ── VarSupp (Spatial Variance Suppression — var-suppression branch) ──
+    # Zero-parameter texture debiasing. Inserts inverse-variance channel
+    # attention after each residual stage. Works on all architectures.
+    "vsupp_res18",              # CIFAR + ImageNet
+    "vsupp_res34",              # CIFAR + ImageNet
+    "vsupp_res50",              # CIFAR + ImageNet  ★ primary benchmark
+    "vsupp_res101",             # CIFAR + ImageNet
+    "vsupp_convnext_tiny",      # ImageNet only
+    "vsupp_convnext_base",      # ImageNet only
+    "vsupp_effnet_b0",          # ImageNet only
+    "vsupp_effnet_b4",          # ImageNet only
     # ── CMConv full quadrature (complex-modulus-conv branch) ─────────────
     # Single weight W; imaginary = rot90(W). ~1.5× FLOPs. Full Mallat stability.
     "cmconv_res18",              # CIFAR + ImageNet
@@ -2727,6 +2838,15 @@ def build_model(name: str,
     if name == "robustconv_effnet_b0":     return RobustEfficientNet("b0", **kw)
     if name == "robustconv_effnet_b4":     return RobustEfficientNet("b4", **kw)
 
+    # ── VarSupp ───────────────────────────────────────────────
+    if name == "vsupp_res18":         return VarSuppResNet("18",  **kw)
+    if name == "vsupp_res34":         return VarSuppResNet("34",  **kw)
+    if name == "vsupp_res50":         return VarSuppResNet("50",  **kw)
+    if name == "vsupp_res101":        return VarSuppResNet("101", **kw)
+    if name == "vsupp_convnext_tiny": return VarSuppConvNeXt("tiny", **kw)
+    if name == "vsupp_convnext_base": return VarSuppConvNeXt("base", **kw)
+    if name == "vsupp_effnet_b0":     return VarSuppEfficientNet("b0", **kw)
+    if name == "vsupp_effnet_b4":     return VarSuppEfficientNet("b4", **kw)
     # ── CMConv full quadrature ────────────────────────────────
     if name == "cmconv_res18":         return CMConvResNet("18",  **kw)
     if name == "cmconv_res34":         return CMConvResNet("34",  **kw)

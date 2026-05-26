@@ -456,6 +456,8 @@ def train_model(name: str) -> float:
             loss  = crit(model(x), y) / args.accum_steps
             loss.backward()
             loss_sum += loss.item() * args.accum_steps
+            if hasattr(unwrap(model), "update_prototypes"):
+                unwrap(model).update_prototypes(y)
 
             if (step + 1) % args.accum_steps == 0:
                 nn.utils.clip_grad_norm_(unwrap(model).parameters(), 5.0)

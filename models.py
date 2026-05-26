@@ -2944,8 +2944,8 @@ class ShapeBiasNet(nn.Module):
         # (e.g. ResNet-50 vs ResNet-101 both have 1024ch at layer3).
         _NBLOCKS = {
             "custom": (1, 1, 1),
-            "18":     (1, 2, 1),
-            "34":     (1, 2, 1),
+            "18":     (2, 2, 1),
+            "34":     (2, 2, 1),
             "50":     (2, 2, 1),
             "101":    (2, 2, 1),
         }
@@ -2962,7 +2962,7 @@ class ShapeBiasNet(nn.Module):
 
         # ── Fusion head: late concat r3 + s3 ─────────────────────────────
         fusion_in_ch  = rgb_out_ch + shape_out_ch
-        fusion_mid_ch = max(128, fusion_in_ch // 4)
+        fusion_mid_ch = max(320, fusion_in_ch // 4)
         self.fusion = nn.Sequential(
             nn.Conv2d(fusion_in_ch, fusion_mid_ch, kernel_size=1),
             nn.BatchNorm2d(fusion_mid_ch), nn.ReLU(),

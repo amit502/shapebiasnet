@@ -147,7 +147,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: pcn-res50-img
+  name: shape-res50-img
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -177,11 +177,11 @@ spec:
 
               # ── Step 0: Clone repo ────────────────────────────
               echo "=========================================="
-              echo "  Step 0: Cloning repo (branch: var-suppression)"
+              echo "  Step 0: Cloning repo (branch: shape-res)"
               echo "=========================================="
               apt-get update -qq && apt-get install -y -qq git
               git clone \
-                --branch var-suppression \
+                --branch shape-res \
                 --single-branch \
                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
                 /shapebiasnet
@@ -208,8 +208,9 @@ spec:
               echo "=========================================="
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
+              rm -f /pvc/checkpoints/shape_res50_imagenet100.pt
               python -u train.py \
-                --model       pcn_res50 \
+                --model       shape_res50 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \
@@ -223,7 +224,7 @@ spec:
               echo "  Step 3: Full Evaluation (ImageNet-100 val + ImageNet-100-C)"
               echo "=========================================="
               python -u eval.py \
-                --model       pcn_res50 \
+                --model       shape_res50 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
                 --ckpt_dir    /pvc/checkpoints \

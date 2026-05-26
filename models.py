@@ -806,7 +806,13 @@ class OrientationBank(nn.Module):
     Builds `out_ch` Sobel-based kernels uniformly spaced over [0, pi).
     Applied to grayscale (mean of RGB) — colour invariant by design.
     Output normalised per spatial location for scale invariance.
-    Resolution-agnostic: identical behaviour on 32×32 and 224×224.
+
+    Scale-adaptive Gaussian pre-blur (sigma = H/32):
+      CIFAR  H=32  → sigma=1  → near-identity, current behaviour preserved
+      ImageNet H=224 → sigma=7  → suppresses texture-scale edges (period <14px),
+                                   retains structural contours (object boundaries)
+    Grounded in scale-space theory (Lindeberg 1994): detect edges at the same
+    relative scale regardless of input resolution. Zero new parameters.
     """
     def __init__(self, out_ch: int = 16):
         super().__init__()
@@ -816,12 +822,26 @@ class OrientationBank(nn.Module):
         for k in range(out_ch):
             theta = math.pi * k / out_ch
             kernels.append(math.cos(theta) * gx + math.sin(theta) * gy)
-        # shape: (out_ch, 1, 3, 3) — register as buffer (not a parameter)
         self.register_buffer("weight", torch.stack(kernels).unsqueeze(1))
 
+    @staticmethod
+    def _gaussian_blur(gray: torch.Tensor, sigma: float) -> torch.Tensor:
+        ks = max(3, int(6 * sigma + 1) | 1)          # odd, at least 3
+        ks = min(ks, min(gray.shape[2], gray.shape[3]) | 1)  # clamp to image size
+        ax = torch.arange(ks, dtype=gray.dtype, device=gray.device) - ks // 2
+        g  = torch.exp(-ax.pow(2) / (2 * sigma ** 2))
+        g  = g / g.sum()
+        # separable 2D Gaussian via two 1D convolutions
+        gray = F.conv2d(gray, g.view(1, 1, 1, ks), padding=(0, ks // 2))
+        gray = F.conv2d(gray, g.view(1, 1, ks, 1), padding=(ks // 2, 0))
+        return gray
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gray = x.mean(dim=1, keepdim=True)
-        e    = F.conv2d(gray, self.weight, padding=1).abs()
+        gray  = x.mean(dim=1, keepdim=True)
+        sigma = gray.shape[2] / 32.0              # H/32: sigma=1 at CIFAR, 7 at ImageNet
+        if sigma > 1.0:
+            gray = self._gaussian_blur(gray, sigma)
+        e = F.conv2d(gray, self.weight, padding=1).abs()
         return e / (e.mean(dim=(2, 3), keepdim=True) + 1e-6)
 
 

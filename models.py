@@ -1446,11 +1446,23 @@ class ADSupEfficientNet(nn.Module):
 class PCNResNet(nn.Module):
     """Predictive Coding Network: top-down texture suppression via class prototypes.
 
-    S_i = F3_i - (p_i @ M)   where M[k] = EMA mean of GAP(layer3) for class k,
-                                    p_i  = softmax of preliminary logits from F3_i.
+    Subtraction happens at the EMBEDDING level (after GAP of layer4), not at the
+    feature-map level.  This avoids the distribution-shift collapse that occurs
+    when f3 is modified before layer4.
 
-    Backprop flows only through the second layer4 pass; the texture prediction T
-    is computed under torch.no_grad() so it acts as a detached correction signal.
+    Single forward pass:
+        z      = GAP(layer4(layer3(…)))               # (B, C4) — standard embedding
+        p      = softmax(fc(z).detach())              # preliminary class distribution
+        T      = p @ prototypes                       # class-conditional texture in embed space
+        z_shape = z − T                               # within-class (shape) residual
+        logits = fc(z_shape)                          # classify from shape embedding
+
+    Why this works:
+        prototypes[k] ≈ E[z | class=k]  (EMA of class-mean embeddings)
+        z − E[z|k]  ≈ within-class deviation  = shape-specific information
+        z itself     ≈ E[z|k] + deviation      = texture + shape
+        Training the classifier on z_shape teaches it to use shape features;
+        at test time the classifier's shape bias persists even under corruption.
 
     Call model.update_prototypes(labels) from train.py after each forward step.
     """
@@ -1464,57 +1476,50 @@ class PCNResNet(nn.Module):
         if "cifar" in dataset:
             net.conv1 = nn.Conv2d(3, 64, 3, 1, 1, bias=False)
             net.maxpool = nn.Identity()
-        out_ch   = 512  if depth in ("18", "34") else 2048
-        layer3_ch = 256 if depth in ("18", "34") else 1024
+        out_ch = 512 if depth in ("18", "34") else 2048
         net.fc = nn.Linear(out_ch, num_classes)
+        self.model    = net
+        self.out_ch   = out_ch
 
-        self.stem   = nn.Sequential(net.conv1, net.bn1, net.relu, net.maxpool)
-        self.layer1 = net.layer1
-        self.layer2 = net.layer2
-        self.layer3 = net.layer3
-        self.layer4 = net.layer4
-        self.fc     = net.fc
-
-        # EMA class prototypes — NOT trained, updated via update_prototypes()
-        self.register_buffer("prototypes",   torch.zeros(num_classes, layer3_ch))
-        self.register_buffer("proto_ready",  torch.zeros(num_classes, dtype=torch.bool))
-        self.momentum    = momentum
-        self._f3_gap_cache: torch.Tensor | None = None  # set during forward
+        # EMA class prototypes in embedding space — NOT trained parameters
+        self.register_buffer("prototypes",  torch.zeros(num_classes, out_ch))
+        self.register_buffer("proto_ready", torch.zeros(num_classes, dtype=torch.bool))
+        self.momentum = momentum
+        self._z_cache: torch.Tensor | None = None  # GAP(f4), set during forward
 
     # ── forward ──────────────────────────────────────────────────────────────
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h  = self.stem(x)
-        h  = self.layer1(h)
-        h  = self.layer2(h)
-        f3 = self.layer3(h)                                      # (B, C3, H, W)
+        # Standard ResNet forward up to the embedding
+        m  = self.model
+        h  = m.relu(m.bn1(m.conv1(x)))
+        h  = m.maxpool(h)
+        h  = m.layer1(h); h = m.layer2(h); h = m.layer3(h); h = m.layer4(h)
+        z  = h.mean(dim=[-2, -1])                               # (B, C4) — GAP
 
-        # Cache for prototype update (detached — no grad through EMA)
-        self._f3_gap_cache = f3.mean(dim=[-2, -1]).detach()      # (B, C3)
+        # Cache embedding for prototype update (no grad)
+        self._z_cache = z.detach()
 
-        # Pass 1 — preliminary class distribution (no grad)
+        # Preliminary class distribution from full embedding (no grad)
         with torch.no_grad():
-            prelim  = self.fc(self.layer4(f3).mean(dim=[-2, -1]))
-            p       = torch.softmax(prelim, dim=1)               # (B, num_classes)
+            p = torch.softmax(m.fc(z), dim=1)                   # (B, num_classes)
 
         # Top-down texture prediction: weighted class prototype
-        T = (p @ self.prototypes).unsqueeze(-1).unsqueeze(-1)    # (B, C3, 1, 1)
+        T = (p @ self.prototypes)                               # (B, C4)
 
-        # Shape residual — texture-suppressed layer3 features
-        f3_shape = f3 - T                                        # (B, C3, H, W)
+        # Shape embedding: within-class deviation from class-mean texture
+        z_shape = z - T                                         # (B, C4)
 
-        # Pass 2 — final forward from shape residual
-        out = self.layer4(f3_shape)
-        return self.fc(out.mean(dim=[-2, -1]))
+        return m.fc(z_shape)
 
     # ── prototype update (call from train.py each batch) ─────────────────────
     @torch.no_grad()
     def update_prototypes(self, labels: torch.Tensor) -> None:
-        if self._f3_gap_cache is None:
+        if self._z_cache is None:
             return
-        f3_gap = self._f3_gap_cache                              # (B, C3)
+        z = self._z_cache                                       # (B, C4)
         for c in labels.unique():
             mask       = labels == c
-            batch_mean = f3_gap[mask].mean(0)
+            batch_mean = z[mask].mean(0)
             if not self.proto_ready[c]:
                 self.prototypes[c] = batch_mean
                 self.proto_ready[c] = True

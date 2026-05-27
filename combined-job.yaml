@@ -147,7 +147,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: shape-res50-img
+  name: shape-res50-img-full
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -181,7 +181,7 @@ spec:
               echo "=========================================="
               apt-get update -qq && apt-get install -y -qq git
               git clone \
-                --branch shape-res \
+                --branch shape-res-imagenet \
                 --single-branch \
                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
                 /shapebiasnet
@@ -195,7 +195,9 @@ spec:
               pip install -r requirements.txt --quiet
 
               # ── Create output dirs on PVC ─────────────────────
-              mkdir -p /pvc/checkpoints /pvc/results
+              CKPT_DIR="/pvc/checkpoints/layer4-fix"
+              RESULTS_DIR="/pvc/results/layer4-fix"
+              mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
 
               # Clear any leftover GPU memory from previous jobs
               fuser -k /dev/nvidia* 2>/dev/null || true
@@ -208,12 +210,12 @@ spec:
               echo "=========================================="
               echo "  Step 2: Training (ImageNet-100, clean data only)"
               echo "=========================================="
-              rm -f /pvc/checkpoints/shape_res50_imagenet100.pt
+              rm -f "$CKPT_DIR/shape_res50_imagenet100.pt"
               python -u train.py \
                 --model       shape_res50 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
-                --ckpt_dir    /pvc/checkpoints \
+                --ckpt_dir    "$CKPT_DIR" \
                 --epochs      50 \
                 --batch       64 \
                 --workers     8
@@ -227,8 +229,8 @@ spec:
                 --model       shape_res50 \
                 --dataset     imagenet100 \
                 --data_dir    /pvc/imagenet100 \
-                --ckpt_dir    /pvc/checkpoints \
-                --results_dir /pvc/results \
+                --ckpt_dir    "$CKPT_DIR" \
+                --results_dir "$RESULTS_DIR" \
                 --batch       64 \
                 --workers     8 \
                 || echo "  [WARN] Eval failed — ImageNet-100-C may not be ready."
@@ -249,8 +251,8 @@ spec:
               echo "=========================================="
               echo "  Pipeline complete. Results:"
               echo "=========================================="
-              ls -lh /pvc/results/
-              ls -lh /pvc/checkpoints/
+              ls -lh "$RESULTS_DIR"/
+              ls -lh "$CKPT_DIR"/
 
           resources:
             requests:

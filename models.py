@@ -2567,7 +2567,17 @@ class RGBResNet(nn.Module):
 
         self.stem   = nn.Sequential(net.conv1, net.bn1, net.relu, net.maxpool)
         self.l1, self.l2, self.l3 = net.layer1, net.layer2, net.layer3
-        self.out_ch = [64, 128, 256] if depth in ("18", "34") else [256, 512, 1024]
+
+        # For ImageNet, include layer4 so the shape model uses the same backbone
+        # depth as BaselineResNet (which runs the full torchvision ResNet).
+        # For CIFAR, layer4 output would be 4×4 — too small to be useful, excluded.
+        if "cifar" not in dataset:
+            self.l4 = net.layer4
+            l4_ch = 512 if depth in ("18", "34") else 2048
+            self.out_ch = [64, 128, l4_ch]
+        else:
+            self.l4 = None
+            self.out_ch = [64, 128, 256] if depth in ("18", "34") else [256, 512, 1024]
 
     def forward_until_l2(self, x: torch.Tensor):
         r1 = self.l1(self.stem(x))
@@ -2579,7 +2589,10 @@ class RGBResNet(nn.Module):
 
     def forward(self, x: torch.Tensor):
         r1, r2 = self.forward_until_l2(x)
-        return r1, r2, self.run_l3(r2)
+        r3 = self.run_l3(r2)
+        if self.l4 is not None:
+            r3 = self.l4(r3)   # ImageNet: return layer4 output as r3 (7×7)
+        return r1, r2, r3
 
 
 class RGBConvNeXt(nn.Module):

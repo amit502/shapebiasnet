@@ -1,31 +1,31 @@
 # cifar-sweep-job.yaml
 # ─────────────────────────────────────────────────────────────
-# Sequential sweep: all non-baseline res18/res50 models
+# Sequential sweep: shape_res18 / shape_res50
 # on CIFAR-10 and CIFAR-100, across seeds 42 / 23 / 17.
 #
-# Each model trains and evals independently — results saved exactly
-# as if each model were run as a standalone job.
-# Models (8 total):
-#   cmconv_res18     / cmconv_res50      <- full quadrature (~1.5× FLOPs)
-#   cmconv_abs_res18 / cmconv_abs_res50  <- half-plane (1.0× FLOPs, ablation)
-#   sdn_ginsc_res18  / sdn_ginsc_res50   <- SDN+GINSC (freq-norm ablation)
-#   fdn_ginsc_res18  / fdn_ginsc_res50   <- FDN+GINSC (freq-norm ablation)
+# Each run is fully isolated — existing checkpoint deleted before
+# training so no prior state bleeds across seeds or datasets.
+# Results saved exactly as if each model were run as a standalone job.
+#
+# Models (4 total):
+#   baseline_res18 / baseline_res50  — vanilla ResNet (same env as shape models)
+#   shape_res18    / shape_res50     — dual-stream + scale-adaptive OrientationBank
 #
 # Datasets: cifar10 / cifar100
 # Seeds:    42 / 23 / 17
-# Total runs: 8 models x 2 datasets x 3 seeds = 48 sequential runs
+# Total runs: 4 models x 2 datasets x 3 seeds = 24 sequential runs
 #
 # Results layout on PVC:
-#   /pvc/results/seed-42/fdn_ginsc_res50_cifar10_results.json
-#   /pvc/results/seed-42/fdn_ginsc_res50_cifar10_report.txt
+#   /pvc/results/seed-42/shape_res50_cifar100_results.json
+#   /pvc/results/seed-42/shape_res50_cifar100_report.txt
 #   /pvc/results/seed-23/...
 #   ...
 #
 # Checkpoint layout:
-#   /pvc/checkpoints/seed-42/fdn_ginsc_res50_cifar10.pt
+#   /pvc/checkpoints/seed-42/shape_res50_cifar100.pt
 #   ...
 #
-# Estimated runtime: ~30-40 min per run x 48 = 24-32 hours total
+# Estimated runtime: ~30-40 min per run x 24 = 12-16 hours total
 # Individual failures are logged and skipped — job continues.
 #
 # Nautilus resource policy:
@@ -35,13 +35,13 @@
 #   backoffLimit=0
 #
 # Submit:  kubectl apply -f cifar-sweep-job.yaml
-# Logs:    kubectl logs -f job/cifar-sweep-img -n kc-ai-research-lab
-# Delete:  kubectl delete job cifar-sweep-img -n kc-ai-research-lab
+# Logs:    kubectl logs -f job/shape-res-cifar-sweep -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-res-cifar-sweep -n kc-ai-research-lab
 # ─────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: cifar-sweep-img
+  name: shape-res-cifar-sweep
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -71,11 +71,11 @@ spec:
 
               # ── Step 0: Clone repo ────────────────────────────
               echo "=========================================="
-              echo "  Step 0: Cloning repo (branch: complex-modulus-conv)"
+              echo "  Step 0: Cloning repo (branch: shape-res)"
               echo "=========================================="
               apt-get update -qq && apt-get install -y -qq git
               git clone \
-                --branch complex-modulus-conv \
+                --branch shape-res \
                 --single-branch \
                 https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
                 /shapebiasnet
@@ -88,10 +88,17 @@ spec:
               echo "=========================================="
               pip install -r requirements.txt --quiet
 
+              # ── GPU info ──────────────────────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  GPU Specifications"
+              echo "=========================================="
+              nvidia-smi
+
               # ── Setup complete — disable exit-on-error for sweep ──
               set +e
 
-              MODELS="cmconv_res18 cmconv_res50 cmconv_abs_res18 cmconv_abs_res50 sdn_ginsc_res18 sdn_ginsc_res50 fdn_ginsc_res18 fdn_ginsc_res50"
+              MODELS="baseline_res18 baseline_res50 shape_res18 shape_res50"
               SEEDS="42 23 17"
               PASS=0
               FAIL=0
@@ -109,6 +116,9 @@ spec:
                     echo "============================================================"
                     echo "  MODEL=$MODEL  DATASET=$DATASET  SEED=$SEED"
                     echo "============================================================"
+
+                    # ── Delete stale checkpoint ────────────────────────
+                    rm -f "$CKPT_DIR/${MODEL}_${DATASET}.pt"
 
                     # ── Train ──────────────────────────────────────────
                     python -u train.py \

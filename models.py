@@ -807,15 +807,13 @@ class OrientationBank(nn.Module):
     Applied to grayscale (mean of RGB) — colour invariant by design.
     Output normalised per spatial location for scale invariance.
 
-    Scale-adaptive downsampling (factor = H // 32):
-      CIFAR  H=32  → factor=1  → no-op, identical to original behaviour
-      ImageNet H=224 → factor=7  → avg_pool2d(7,7) → 32×32 output
+    Resolution-matched downsampling (target_h driven by RGB layer3 size):
+      CIFAR    H=32  → target_h=32 → factor=1 → no-op   → shape: 32→16→8
+      ImageNet H=224 → target_h=56 → factor=4 → 56×56   → shape: 56→28→14
 
-    avg_pool2d acts as box-filter anti-aliasing + downsample in one step,
-    suppressing texture-scale edges before Sobel exactly as a Gaussian would,
-    but without any per-batch kernel computation. The shape stream then always
-    runs at 32×32 → 16×16 → 8×8 regardless of input resolution — eliminating
-    the 49× overhead of processing stage1 at 224×224. Zero new parameters.
+    target_h = r3.shape[2] * 4 is passed from ShapeBiasNet.forward, so
+    the shape stream output always matches the RGB layer3 spatial size exactly.
+    No interpolation at fusion. avg_pool2d is a no-op on CIFAR. Zero new params.
     """
     def __init__(self, out_ch: int = 16):
         super().__init__()
@@ -827,9 +825,9 @@ class OrientationBank(nn.Module):
             kernels.append(math.cos(theta) * gx + math.sin(theta) * gy)
         self.register_buffer("weight", torch.stack(kernels).unsqueeze(1))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, target_h: int = 32) -> torch.Tensor:
         gray = x.mean(dim=1, keepdim=True)          # (B, 1, H, W)
-        s = gray.shape[2] // 32                     # downsample factor: 1 for CIFAR, 7 for ImageNet
+        s = max(1, gray.shape[2] // target_h)       # 1 for CIFAR, 4 for ImageNet-224
         if s > 1:
             gray = F.avg_pool2d(gray, kernel_size=s, stride=s)
         e = F.conv2d(gray, self.weight, padding=1).abs()
@@ -2475,8 +2473,8 @@ class ShapeEncoder(nn.Module):
             *[ShapeDiffusion(c3) for _ in range(n_blocks[2])],
         )
 
-    def forward(self, x: torch.Tensor):
-        s1 = self.stage1(self.edge(x))
+    def forward(self, x: torch.Tensor, target_h: int = 32):
+        s1 = self.stage1(self.edge(x, target_h))
         s2 = self.stage2(s1)
         s3 = self.stage3(s2)
         return s1, s2, s3
@@ -2967,9 +2965,9 @@ class ShapeBiasNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, _, s3 = self.shape(x)
         _, _, r3 = self.rgb(x)
-        s3 = F.interpolate(s3, size=r3.shape[2:], mode="bilinear", align_corners=False)
+        _, _, s3 = self.shape(x, target_h=r3.shape[2] * 4)
+        # s3 spatially matches r3 by construction — no interpolation needed
         return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
 
 

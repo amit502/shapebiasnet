@@ -807,12 +807,15 @@ class OrientationBank(nn.Module):
     Applied to grayscale (mean of RGB) — colour invariant by design.
     Output normalised per spatial location for scale invariance.
 
-    Scale-adaptive Gaussian pre-blur (sigma = H/32):
-      CIFAR  H=32  → sigma=1  → near-identity, current behaviour preserved
-      ImageNet H=224 → sigma=7  → suppresses texture-scale edges (period <14px),
-                                   retains structural contours (object boundaries)
-    Grounded in scale-space theory (Lindeberg 1994): detect edges at the same
-    relative scale regardless of input resolution. Zero new parameters.
+    Scale-adaptive downsampling (factor = H // 32):
+      CIFAR  H=32  → factor=1  → no-op, identical to original behaviour
+      ImageNet H=224 → factor=7  → avg_pool2d(7,7) → 32×32 output
+
+    avg_pool2d acts as box-filter anti-aliasing + downsample in one step,
+    suppressing texture-scale edges before Sobel exactly as a Gaussian would,
+    but without any per-batch kernel computation. The shape stream then always
+    runs at 32×32 → 16×16 → 8×8 regardless of input resolution — eliminating
+    the 49× overhead of processing stage1 at 224×224. Zero new parameters.
     """
     def __init__(self, out_ch: int = 16):
         super().__init__()
@@ -824,23 +827,11 @@ class OrientationBank(nn.Module):
             kernels.append(math.cos(theta) * gx + math.sin(theta) * gy)
         self.register_buffer("weight", torch.stack(kernels).unsqueeze(1))
 
-    @staticmethod
-    def _gaussian_blur(gray: torch.Tensor, sigma: float) -> torch.Tensor:
-        ks = max(3, int(6 * sigma + 1) | 1)          # odd, at least 3
-        ks = min(ks, min(gray.shape[2], gray.shape[3]) | 1)  # clamp to image size
-        ax = torch.arange(ks, dtype=gray.dtype, device=gray.device) - ks // 2
-        g  = torch.exp(-ax.pow(2) / (2 * sigma ** 2))
-        g  = g / g.sum()
-        # separable 2D Gaussian via two 1D convolutions
-        gray = F.conv2d(gray, g.view(1, 1, 1, ks), padding=(0, ks // 2))
-        gray = F.conv2d(gray, g.view(1, 1, ks, 1), padding=(ks // 2, 0))
-        return gray
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gray  = x.mean(dim=1, keepdim=True)
-        sigma = gray.shape[2] / 32.0              # H/32: sigma=1 at CIFAR, 7 at ImageNet
-        if sigma > 1.0:
-            gray = self._gaussian_blur(gray, sigma)
+        gray = x.mean(dim=1, keepdim=True)          # (B, 1, H, W)
+        s = gray.shape[2] // 32                     # downsample factor: 1 for CIFAR, 7 for ImageNet
+        if s > 1:
+            gray = F.avg_pool2d(gray, kernel_size=s, stride=s)
         e = F.conv2d(gray, self.weight, padding=1).abs()
         return e / (e.mean(dim=(2, 3), keepdim=True) + 1e-6)
 

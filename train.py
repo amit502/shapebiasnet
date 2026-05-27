@@ -405,25 +405,9 @@ def train_model(name: str) -> float:
         print(f"  [DataParallel] Using {NUM_GPUS} GPUs")
         model = nn.DataParallel(model)
 
-    is_dual_stream = name.startswith("shape")
-    wd = 1e-4 if is_dual_stream else 5e-4
     opt  = torch.optim.SGD(unwrap(model).parameters(), lr=args.lr,
-                           momentum=0.9, weight_decay=wd, nesterov=True)
-    warmup_epochs = 0 if is_dual_stream else min(5, EPOCHS // 8)
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=EPOCHS - warmup_epochs)
-    if warmup_epochs > 0:
-        sch = torch.optim.lr_scheduler.SequentialLR(
-            opt,
-            schedulers=[
-                torch.optim.lr_scheduler.LinearLR(
-                    opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs),
-                cosine,
-            ],
-            milestones=[warmup_epochs],
-        )
-    else:
-        sch = cosine
+                           momentum=0.9, weight_decay=1e-4, nesterov=True)
+    sch  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
     crit = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     start_ep = 1

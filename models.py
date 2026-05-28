@@ -2940,10 +2940,14 @@ class ShapeBiasNet(nn.Module):
         else:
             raise ValueError(f"Unknown rgb_type '{rgb_type}'")
 
-        # ── Shape encoder: width = rgb_out_ch // 4, min 64 ──────────────
-        # Depth (n_blocks) scales with backbone so deeper backbones get
-        # more diffusion capacity even when channel width is equal
-        # (e.g. ResNet-50 vs ResNet-101 both have 1024ch at layer3).
+        # ── Shape encoder: width scales with backbone (min 256) ─────────
+        # shape_out_ch = max(256, rgb_out_ch // 4) keeps the shape stream
+        # at ~20% of fusion input across all backbone depths:
+        #   ResNet-18/34 CIFAR  (rgb=256)  → 256  (floor, unchanged)
+        #   ResNet-50/101 CIFAR (rgb=1024) → 256  (floor, unchanged)
+        #   ResNet-50/101 ImageNet+layer4  → 512  (auto-scales up)
+        # Previously _SHAPE_CH hardcoded 256 for all ResNets, which left
+        # shape at only 11% of fusion when layer4 added rgb_out_ch to 2048.
         _NBLOCKS = {
             "custom": (1, 1, 1),
             "18":     (2, 2, 1),
@@ -2951,15 +2955,8 @@ class ShapeBiasNet(nn.Module):
             "50":     (2, 2, 1),
             "101":    (2, 2, 1),
         }
-        _SHAPE_CH = {
-            "custom": 256,
-            "18":     256,
-            "34":     256,
-            "50":     256,
-            "101":    256,
-        }
         n_blocks     = _NBLOCKS.get(rgb_type, (2, 2, 1))
-        shape_out_ch = _SHAPE_CH.get(rgb_type, max(64, rgb_out_ch // 4))
+        shape_out_ch = max(256, rgb_out_ch // 4)
         self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
 
         # ── Fusion head: late concat r3 + s3 ─────────────────────────────

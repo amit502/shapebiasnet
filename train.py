@@ -204,6 +204,10 @@ p.add_argument("--augmix", action="store_true",
                help="Use AugMix augmentation (ablation only). "
                     "Saves checkpoint as <model>_<dataset>_augmix.pt. "
                     "Does NOT affect clean training runs.")
+p.add_argument("--aux", action="store_true",
+               help="Add auxiliary classification head on shape stream "
+                    "(shape_* models only). Head is training-only; "
+                    "inference is identical to non-aux model.")
 
 args = p.parse_args()
 
@@ -397,7 +401,8 @@ def train_model(name: str) -> float:
     # ── build model ──────────────────────────────────────────
     # Use "imagenet" as dataset key for build_model — imagenet100 uses
     # the same 7×7 stem as full ImageNet (224×224 images)
-    model = build_model(name, NUM_CLASSES, dataset=MODEL_DATASET).to(DEVICE)
+    model = build_model(name, NUM_CLASSES, dataset=MODEL_DATASET,
+                        aux=args.aux).to(DEVICE)
 
     # ── DataParallel disabled — causes NCCL hang on Nautilus multi-GPU nodes
     # Use single GPU only (GPU 0)
@@ -442,7 +447,12 @@ def train_model(name: str) -> float:
 
         for step, (x, y) in enumerate(trainloader):
             x, y  = x.to(DEVICE, non_blocking=True), y.to(DEVICE, non_blocking=True)
-            loss  = crit(model(x), y) / args.accum_steps
+            out   = model(x)
+            if isinstance(out, tuple):      # aux head active (training only)
+                logits, aux_logits = out
+                loss = (crit(logits, y) + 0.3 * crit(aux_logits, y)) / args.accum_steps
+            else:
+                loss = crit(out, y) / args.accum_steps
             loss.backward()
             loss_sum += loss.item() * args.accum_steps
             if hasattr(unwrap(model), "update_prototypes"):

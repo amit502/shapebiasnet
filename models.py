@@ -2920,7 +2920,8 @@ class ShapeBiasNet(nn.Module):
     def __init__(self,
                  rgb_type: str    = "custom",
                  num_classes: int = 10,
-                 dataset: str     = "cifar10"):
+                 dataset: str     = "cifar10",
+                 aux: bool        = False):
         super().__init__()
 
         if rgb_type == "custom":
@@ -2984,12 +2985,22 @@ class ShapeBiasNet(nn.Module):
             nn.Flatten(),
             nn.Linear(256, num_classes),
         )
+        # Auxiliary head on shape stream — training only, discarded at inference.
+        # Forces the shape encoder to learn class-discriminative features
+        # independently, preventing gradient dilution by the RGB stream.
+        self.aux_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(shape_out_ch, num_classes),
+        ) if aux else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         _, _, r3 = self.rgb(x)
         _, _, s3 = self.shape(x, target_h=r3.shape[2] * 4)
-        # s3 spatially matches r3 by construction — no interpolation needed
-        return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
+        out = self.head(self.fusion(torch.cat([r3, s3], dim=1)))
+        if self.aux_head is not None and self.training:
+            return out, self.aux_head(s3)
+        return out
 
 
 # ─────────────────────────────────────────────────────────────
@@ -3176,7 +3187,8 @@ MODEL_NAMES = [
 
 def build_model(name: str,
                 num_classes: int,
-                dataset: str = "cifar10") -> nn.Module:
+                dataset: str  = "cifar10",
+                aux: bool     = False) -> nn.Module:
     """
     Instantiate a model by name.
 
@@ -3345,14 +3357,14 @@ def build_model(name: str,
     if name == "fdn_ginsc_effnet_b4":     return FDNGISCEfficientNet("b4", **kw)
 
     # ── ShapeBiasNet ──────────────────────────────────────────
-    if name == "shape_custom":        return ShapeBiasNet("custom",        **kw)
-    if name == "shape_res18":         return ShapeBiasNet("18",            **kw)
-    if name == "shape_res34":         return ShapeBiasNet("34",            **kw)
-    if name == "shape_res50":         return ShapeBiasNet("50",            **kw)
-    if name == "shape_res101":        return ShapeBiasNet("101",           **kw)
-    if name == "shape_convnext_tiny": return ShapeBiasNet("convnext_tiny", **kw)
-    if name == "shape_convnext_base": return ShapeBiasNet("convnext_base", **kw)
-    if name == "shape_effnet_b0":     return ShapeBiasNet("effnet_b0",     **kw)
-    if name == "shape_effnet_b4":     return ShapeBiasNet("effnet_b4",     **kw)
+    if name == "shape_custom":        return ShapeBiasNet("custom",        **kw, aux=aux)
+    if name == "shape_res18":         return ShapeBiasNet("18",            **kw, aux=aux)
+    if name == "shape_res34":         return ShapeBiasNet("34",            **kw, aux=aux)
+    if name == "shape_res50":         return ShapeBiasNet("50",            **kw, aux=aux)
+    if name == "shape_res101":        return ShapeBiasNet("101",           **kw, aux=aux)
+    if name == "shape_convnext_tiny": return ShapeBiasNet("convnext_tiny", **kw, aux=aux)
+    if name == "shape_convnext_base": return ShapeBiasNet("convnext_base", **kw, aux=aux)
+    if name == "shape_effnet_b0":     return ShapeBiasNet("effnet_b0",     **kw, aux=aux)
+    if name == "shape_effnet_b4":     return ShapeBiasNet("effnet_b4",     **kw, aux=aux)
 
     raise ValueError(f"Unknown model '{name}'. Choose from: {MODEL_NAMES}")

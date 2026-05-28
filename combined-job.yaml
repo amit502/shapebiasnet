@@ -195,8 +195,8 @@ spec:
               pip install -r requirements.txt --quiet
 
               # ── Create output dirs on PVC ─────────────────────
-              CKPT_DIR="/pvc/checkpoints/layer4-fix"
-              RESULTS_DIR="/pvc/results/layer4-fix"
+              CKPT_DIR="/pvc/checkpoints/layer4-shape512"
+              RESULTS_DIR="/pvc/results/layer4-shape512"
               mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
 
               # Clear any leftover GPU memory from previous jobs

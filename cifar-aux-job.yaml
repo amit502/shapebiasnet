@@ -1,0 +1,187 @@
+# cifar-aux-job.yaml
+# ─────────────────────────────────────────────────────────────
+# shape_res50 with auxiliary shape-stream loss (--aux)
+# on CIFAR-10 and CIFAR-100, seeds 42 / 23 / 17.
+#
+# Purpose: verify aux loss maintains (or improves) CIFAR results
+# so the same training procedure can be reported for both CIFAR
+# and ImageNet in the paper.
+#
+# NOTE: layer4 is NOT used for CIFAR — RGBResNet automatically
+# excludes it when "cifar" is in dataset. Architecture is identical
+# to the original CIFAR runs; only the training loss changes.
+#
+# Checkpoints : /pvc/checkpoints/layer4-aux-cifar/seed-{SEED}/
+# Results     : /pvc/results/layer4-aux-cifar/seed-{SEED}/
+#
+# Total runs  : 1 model x 2 datasets x 1 seed = 2 sequential runs
+# Est. runtime: ~30-40 min per run = ~1 hour total
+#
+# Submit:  kubectl apply -f cifar-aux-job.yaml
+# Logs:    kubectl logs -f job/shape-res50-aux-cifar -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-res50-aux-cifar -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-res50-aux-cifar
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      # - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-RTX-5000-Ada-Generation
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              # ── Step 0: Clone repo ────────────────────────────
+              echo "=========================================="
+              echo "  Step 0: Cloning repo (branch: shape-res-imagenet)"
+              echo "=========================================="
+              apt-get update -qq && apt-get install -y -qq git
+              git clone \
+                --branch shape-res-imagenet \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              # ── Step 1: Dependencies ──────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 1: Installing dependencies"
+              echo "=========================================="
+              pip install -r requirements.txt --quiet
+
+              # ── GPU info ──────────────────────────────────────
+              echo ""
+              nvidia-smi
+
+              # ── Disable exit-on-error for sweep ───────────────
+              set +e
+
+              SEEDS="42"
+              PASS=0
+              FAIL=0
+
+              for SEED in $SEEDS; do
+                for DATASET in cifar10 cifar100; do
+
+                  DATA_DIR="/pvc/${DATASET}"
+                  CKPT_DIR="/pvc/checkpoints/layer4-aux-cifar/seed-${SEED}"
+                  RESULTS_DIR="/pvc/results/layer4-aux-cifar/seed-${SEED}"
+                  mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
+
+                  echo ""
+                  echo "============================================================"
+                  echo "  MODEL=shape_res50  DATASET=$DATASET  SEED=$SEED  --aux"
+                  echo "============================================================"
+
+                  rm -f "$CKPT_DIR/shape_res50_${DATASET}.pt"
+
+                  # ── Train ────────────────────────────────────────
+                  python -u train.py \
+                    --model      shape_res50 \
+                    --dataset    $DATASET \
+                    --data_dir   $DATA_DIR \
+                    --ckpt_dir   $CKPT_DIR \
+                    --epochs     40 \
+                    --batch      128 \
+                    --workers    4 \
+                    --seed       $SEED \
+                    --aux
+                  TRAIN_STATUS=$?
+
+                  if [ $TRAIN_STATUS -ne 0 ]; then
+                    echo "  [ERROR] Training failed — skipping eval."
+                    FAIL=$((FAIL + 1))
+                    continue
+                  fi
+
+                  # ── Eval ─────────────────────────────────────────
+                  python -u eval.py \
+                    --model       shape_res50 \
+                    --dataset     $DATASET \
+                    --data_dir    $DATA_DIR \
+                    --ckpt_dir    $CKPT_DIR \
+                    --results_dir $RESULTS_DIR \
+                    --batch       128 \
+                    --workers     4
+                  EVAL_STATUS=$?
+
+                  if [ $EVAL_STATUS -ne 0 ]; then
+                    echo "  [WARN] Eval failed for $DATASET seed=$SEED"
+                    FAIL=$((FAIL + 1))
+                  else
+                    PASS=$((PASS + 1))
+                    echo "  [OK] shape_res50 $DATASET seed=$SEED done."
+                  fi
+
+                done
+              done
+
+              # ── Summary ───────────────────────────────────────
+              echo ""
+              echo "============================================================"
+              echo "  Sweep complete.  Passed: $PASS   Failed: $FAIL"
+              echo "============================================================"
+              ls /pvc/results/layer4-aux-cifar/
+
+          resources:
+            requests:
+              cpu: "3"
+              memory: "9Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "3"
+              memory: "10Gi"
+              nvidia.com/gpu: "1"
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

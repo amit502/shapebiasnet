@@ -2940,14 +2940,23 @@ class ShapeBiasNet(nn.Module):
         else:
             raise ValueError(f"Unknown rgb_type '{rgb_type}'")
 
-        # ── Shape encoder: width scales with backbone (min 256) ─────────
-        # shape_out_ch = max(256, rgb_out_ch // 4) keeps the shape stream
-        # at ~20% of fusion input across all backbone depths:
-        #   ResNet-18/34 CIFAR  (rgb=256)  → 256  (floor, unchanged)
-        #   ResNet-50/101 CIFAR (rgb=1024) → 256  (floor, unchanged)
-        #   ResNet-50/101 ImageNet+layer4  → 512  (auto-scales up)
-        # Previously _SHAPE_CH hardcoded 256 for all ResNets, which left
-        # shape at only 11% of fusion when layer4 added rgb_out_ch to 2048.
+        # ── Shape encoder: width = rgb_out_ch // 4, backbone-aware floor ──
+        # Target ratio: shape ~20% of fusion input (shape / (rgb + shape)).
+        # Floor differs by backbone family:
+        #   ResNets   min=256 — preserves CIFAR results (rgb_out_ch=256 on
+        #             CIFAR would give 64 from the formula, breaking trained
+        #             checkpoints; 256 floor leaves all CIFAR values unchanged)
+        #   Others    min=64  — ConvNeXt/EfficientNet are ImageNet-only so
+        #             no CIFAR checkpoints to preserve; 20% ratio holds cleanly
+        #
+        # Resulting shape_out_ch and fusion ratios:
+        #   res18/34 CIFAR  (rgb=256)   → 256  (50%, floor)   unchanged ✓
+        #   res50/101 CIFAR (rgb=1024)  → 256  (20%, formula) unchanged ✓
+        #   res50/101 ImageNet+layer4   → 512  (20%, formula) scales up ✓
+        #   convnext_tiny   (rgb=384)   →  96  (20%, formula)
+        #   convnext_base   (rgb=512)   → 128  (20%, formula)
+        #   effnet_b0       (rgb=112)   →  64  (36%, floor)
+        #   effnet_b4       (rgb=160)   →  64  (29%, floor)
         _NBLOCKS = {
             "custom": (1, 1, 1),
             "18":     (2, 2, 1),
@@ -2955,8 +2964,10 @@ class ShapeBiasNet(nn.Module):
             "50":     (2, 2, 1),
             "101":    (2, 2, 1),
         }
+        _RESNET_TYPES = {"custom", "18", "34", "50", "101"}
+        min_shape_ch = 256 if rgb_type in _RESNET_TYPES else 64
         n_blocks     = _NBLOCKS.get(rgb_type, (2, 2, 1))
-        shape_out_ch = max(256, rgb_out_ch // 4)
+        shape_out_ch = max(min_shape_ch, rgb_out_ch // 4)
         self.shape   = ShapeEncoder(out_ch=shape_out_ch, n_blocks=n_blocks)
 
         # ── Fusion head: late concat r3 + s3 ─────────────────────────────

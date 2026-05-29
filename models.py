@@ -838,23 +838,29 @@ class ShapeDiffusion(nn.Module):
     """
     Laplacian-guided diffusion block.
 
-    Applies a fixed discrete Laplacian (coefficient 0.12) to spread edge
-    information spatially along iso-contour lines, then a depthwise-separable
-    conv with a residual connection. This acts as an anisotropic diffusion
-    prior: suppresses high-frequency texture noise while preserving boundaries.
+    Applies one step of Laplacian diffusion to spread edge information
+    spatially, then a depthwise-separable conv with a residual connection.
+
+    Learnable components:
+      lam        : per-channel diffusion coefficient, init=0.12, clamped [0, 0.5]
+                   lets each channel independently learn how much diffusion to apply
+      lap_kernel : 3×3 diffusion kernel, init=standard discrete Laplacian,
+                   shared across channels; adapts the spatial spread pattern
     """
     def __init__(self, ch: int):
         super().__init__()
         self.dw = nn.Conv2d(ch, ch, kernel_size=3, padding=1, groups=ch, bias=False)
         self.pw = nn.Conv2d(ch, ch, kernel_size=1, bias=False)
         self.bn = nn.BatchNorm2d(ch)
-        lap = torch.tensor([[0,1,0],[1,-4,1],[0,1,0]], dtype=torch.float32)
-        self.register_buffer("lap", lap.view(1, 1, 3, 3))
+        self.lam = nn.Parameter(torch.full((ch, 1, 1), 0.12))
+        lap = torch.tensor([[0.,1.,0.],[1.,-4.,1.],[0.,1.,0.]])
+        self.lap_kernel = nn.Parameter(lap.view(1, 1, 3, 3))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        lap_x = F.conv2d(x, self.lap.expand(x.size(1), 1, 3, 3),
-                         padding=1, groups=x.size(1))
-        y = self.pw(self.dw(x + 0.12 * lap_x))
+        kernel = self.lap_kernel.expand(x.size(1), 1, 3, 3)
+        lap_x  = F.conv2d(x, kernel, padding=1, groups=x.size(1))
+        lam    = self.lam.clamp(0.0, 0.5)
+        y      = self.pw(self.dw(x + lam * lap_x))
         return F.relu(self.bn(y) + x)
 
 

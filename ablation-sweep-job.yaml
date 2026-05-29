@@ -1,0 +1,210 @@
+# ablation-sweep-job.yaml
+# ─────────────────────────────────────────────────────────────
+# ShapeBiasNet ablation study — ResNet-18 / CIFAR-10 / seed 42
+#
+# Varies gating stage × fusion stage across 7 variants:
+#
+#   Gating × Fusion matrix (rows = gating, cols = fusion):
+#
+#                    | no fusion              | early fusion                  | late fusion
+#   -----------------+------------------------+-------------------------------+--------------------
+#   no gating        | (= baseline, skip)     | shape_res18_early_fuse        | shape_res18 (skip)
+#   early gating     | shape_res18_early_gate_nofuse | shape_res18_early_fuse_early_gate | shape_res18_early_gate
+#   late gating      | shape_res18_gate_only  | shape_res18_early_fuse_late_gate | shape_res18_late_gate
+#
+# Models (7 ablation variants):
+#   shape_res18_early_gate           — early gate + late fusion
+#   shape_res18_late_gate            — late gate  + late fusion
+#   shape_res18_gate_only            — late gate  + no fusion
+#   shape_res18_early_gate_nofuse    — early gate + no fusion
+#   shape_res18_early_fuse           — no gate    + early fusion
+#   shape_res18_early_fuse_early_gate— early gate + early fusion
+#   shape_res18_early_fuse_late_gate — late gate  + early fusion
+#
+# NOTE: baseline_res18 and shape_res18 (no gating, late fusion) are
+#       already available from previous runs — not re-run here.
+#
+# Dataset  : cifar10 only
+# Seed     : 42
+# Epochs   : 40
+# Total runs: 7 models × 1 dataset × 1 seed = 7 sequential runs
+# Est. runtime: ~15-20 min/run = ~2 hours total
+#
+# Checkpoints : /pvc/checkpoints/ablation-res18/seed-42/
+# Results     : /pvc/results/ablation-res18/seed-42/
+#
+# Submit:  kubectl apply -f ablation-sweep-job.yaml
+# Logs:    kubectl logs -f job/shape-ablation-cifar10 -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-ablation-cifar10 -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-ablation-cifar10
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      # - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-RTX-5000-Ada-Generation
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              # ── Step 0: Clone repo ────────────────────────────
+              echo "=========================================="
+              echo "  Step 0: Cloning repo (branch: shape-res-ablation)"
+              echo "=========================================="
+              apt-get update -qq && apt-get install -y -qq git
+              git clone \
+                --branch shape-res-ablation \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              # ── Step 1: Dependencies ──────────────────────────
+              echo ""
+              echo "=========================================="
+              echo "  Step 1: Installing dependencies"
+              echo "=========================================="
+              pip install -r requirements.txt --quiet
+
+              # ── GPU info ──────────────────────────────────────
+              echo ""
+              nvidia-smi
+
+              # ── Disable exit-on-error for sweep ───────────────
+              set +e
+
+              SEED=42
+              DATASET=cifar10
+              DATA_DIR="/pvc/${DATASET}"
+              CKPT_DIR="/pvc/checkpoints/ablation-res18/seed-${SEED}"
+              RESULTS_DIR="/pvc/results/ablation-res18/seed-${SEED}"
+              mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
+
+              MODELS="
+                shape_res18_early_gate
+                shape_res18_late_gate
+                shape_res18_gate_only
+                shape_res18_early_gate_nofuse
+                shape_res18_early_fuse
+                shape_res18_early_fuse_early_gate
+                shape_res18_early_fuse_late_gate
+              "
+
+              PASS=0
+              FAIL=0
+
+              for MODEL in $MODELS; do
+                echo ""
+                echo "============================================================"
+                echo "  MODEL=$MODEL  DATASET=$DATASET  SEED=$SEED"
+                echo "============================================================"
+
+                rm -f "$CKPT_DIR/${MODEL}_${DATASET}.pt"
+
+                # ── Train ────────────────────────────────────────
+                python -u train.py \
+                  --model      $MODEL \
+                  --dataset    $DATASET \
+                  --data_dir   $DATA_DIR \
+                  --ckpt_dir   $CKPT_DIR \
+                  --epochs     40 \
+                  --batch      128 \
+                  --workers    4 \
+                  --seed       $SEED
+                TRAIN_STATUS=$?
+
+                if [ $TRAIN_STATUS -ne 0 ]; then
+                  echo "  [ERROR] Training failed for $MODEL — skipping eval."
+                  FAIL=$((FAIL + 1))
+                  continue
+                fi
+
+                # ── Eval ─────────────────────────────────────────
+                python -u eval.py \
+                  --model       $MODEL \
+                  --dataset     $DATASET \
+                  --data_dir    $DATA_DIR \
+                  --ckpt_dir    $CKPT_DIR \
+                  --results_dir $RESULTS_DIR \
+                  --batch       128 \
+                  --workers     4
+                EVAL_STATUS=$?
+
+                if [ $EVAL_STATUS -ne 0 ]; then
+                  echo "  [WARN] Eval failed for $MODEL seed=$SEED"
+                  FAIL=$((FAIL + 1))
+                else
+                  PASS=$((PASS + 1))
+                  echo "  [OK] $MODEL $DATASET seed=$SEED done."
+                fi
+
+              done
+
+              # ── Summary ───────────────────────────────────────
+              echo ""
+              echo "============================================================"
+              echo "  Sweep complete.  Passed: $PASS   Failed: $FAIL"
+              echo "============================================================"
+              ls "$RESULTS_DIR"/
+
+          resources:
+            requests:
+              cpu: "3"
+              memory: "9Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "3"
+              memory: "10Gi"
+              nvidia.com/gpu: "1"
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

@@ -2972,6 +2972,142 @@ class ShapeBiasNet(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
+#  ABLATION VARIANTS  (ResNet-18 / CIFAR only)
+# ─────────────────────────────────────────────────────────────
+
+class _LearnedGate(nn.Module):
+    """Shape-guided gating: R̃ = (1-α)·R + α·(R ⊙ σ(G(S))), α learned."""
+    def __init__(self, rgb_ch: int, shape_ch: int):
+        super().__init__()
+        self.proj  = nn.Conv2d(shape_ch, rgb_ch, kernel_size=1)
+        self.bn    = nn.BatchNorm2d(rgb_ch)
+        self.alpha = nn.Parameter(torch.zeros(1))  # sigmoid(0) ≈ 0.5 at init
+
+    def forward(self, rgb: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
+        mask  = torch.sigmoid(self.bn(self.proj(shape)))
+        alpha = torch.sigmoid(self.alpha)
+        return (1.0 - alpha) * rgb + alpha * (rgb * mask)
+
+
+class ShapeBiasNetAblation(nn.Module):
+    """
+    Ablation variants of ShapeBiasNet — ResNet-18 / CIFAR datasets only.
+
+    Full gating × fusion matrix (rows = gating, cols = fusion):
+
+                     | no fusion        | early fusion          | late fusion
+    -----------------+------------------+-----------------------+------------------
+    no gating        | (= baseline)     | early_fuse            | shape_res18 (main)
+    early gating     | early_gate_nofuse| early_fuse_early_gate | early_gate
+    late gating      | gate_only        | early_fuse_late_gate  | late_gate
+
+    Variants
+    --------
+    early_gate           : gate r1,r2          + concat(r3,s3) → fusion head
+    late_gate            : gate r3             + concat(r3,s3) → fusion head
+    gate_only            : gate r3, no concat  → classify gated r3
+    early_gate_nofuse    : gate r1,r2, no concat, no late fuse → classify r3
+    early_fuse           : inject s2 at r2 (no gate)  → l3 → classify
+    early_fuse_early_gate: gate r1,r2 + inject s2 at r2 → l3 → classify
+    early_fuse_late_gate : inject s2 at r2 + gate r3 (no late fuse) → classify
+    """
+    VARIANTS = (
+        "early_gate", "late_gate", "gate_only", "early_gate_nofuse",
+        "early_fuse", "early_fuse_early_gate", "early_fuse_late_gate",
+    )
+
+    def __init__(self, num_classes: int, dataset: str, variant: str):
+        super().__init__()
+        assert "cifar" in dataset, "ShapeBiasNetAblation is CIFAR-only"
+        assert variant in self.VARIANTS, f"variant must be one of {self.VARIANTS}"
+        self.variant = variant
+
+        self.rgb   = RGBResNet(depth="18", dataset=dataset)
+        self.shape = ShapeEncoder(out_ch=256, n_blocks=(2, 2, 1))
+
+        r_ch = self.rgb.out_ch          # [64, 128, 256]
+        s_ch = [64, 128, 256]           # ShapeEncoder out_ch//4, //2, full
+
+        # ── Gating modules ────────────────────────────────────────
+        if variant in ("early_gate", "early_gate_nofuse",
+                        "early_fuse_early_gate"):
+            self.gate1 = _LearnedGate(r_ch[0], s_ch[0])   # 64 ↔ 64
+            self.gate2 = _LearnedGate(r_ch[1], s_ch[1])   # 128 ↔ 128
+        if variant in ("late_gate", "gate_only", "early_fuse_late_gate"):
+            self.gate3 = _LearnedGate(r_ch[2], s_ch[2])   # 256 ↔ 256
+
+        # ── Early fusion projection (s2 injected at r2) ───────────
+        if variant in ("early_fuse", "early_fuse_early_gate",
+                        "early_fuse_late_gate"):
+            self.early_proj = nn.Sequential(
+                nn.Conv2d(r_ch[1] + s_ch[1], r_ch[1], kernel_size=1),
+                nn.BatchNorm2d(r_ch[1]), nn.ReLU(),
+            )
+
+        # ── Late fusion head (early_gate / late_gate only) ────────
+        if variant in ("early_gate", "late_gate"):
+            fusion_in  = r_ch[2] + 256
+            fusion_mid = max(320, fusion_in // 4)
+            self.fusion = nn.Sequential(
+                nn.Conv2d(fusion_in, fusion_mid, kernel_size=1),
+                nn.BatchNorm2d(fusion_mid), nn.ReLU(),
+                nn.Conv2d(fusion_mid, 256, kernel_size=3, padding=1),
+                nn.BatchNorm2d(256), nn.ReLU(),
+            )
+            self.head = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+                nn.Linear(256, num_classes),
+            )
+        else:
+            # All other variants classify directly from r3 (256ch)
+            self.head = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+                nn.Linear(r_ch[2], num_classes),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        target_h = x.shape[2]              # 32 for CIFAR
+        s1, s2, s3 = self.shape(x, target_h=target_h)
+
+        if self.variant == "early_gate":
+            r1 = self.gate1(self.rgb.l1(self.rgb.stem(x)), s1)
+            r2 = self.gate2(self.rgb.l2(r1), s2)
+            r3 = self.rgb.l3(r2)
+            return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
+
+        if self.variant == "late_gate":
+            _, _, r3_raw = self.rgb(x)
+            r3 = self.gate3(r3_raw, s3)
+            return self.head(self.fusion(torch.cat([r3, s3], dim=1)))
+
+        if self.variant == "gate_only":
+            _, _, r3_raw = self.rgb(x)
+            return self.head(self.gate3(r3_raw, s3))
+
+        if self.variant == "early_gate_nofuse":
+            r1 = self.gate1(self.rgb.l1(self.rgb.stem(x)), s1)
+            r2 = self.gate2(self.rgb.l2(r1), s2)
+            r3 = self.rgb.l3(r2)
+            return self.head(r3)
+
+        if self.variant == "early_fuse":
+            r1, r2 = self.rgb.forward_until_l2(x)
+            r3 = self.rgb.l3(self.early_proj(torch.cat([r2, s2], dim=1)))
+            return self.head(r3)
+
+        if self.variant == "early_fuse_early_gate":
+            r1 = self.gate1(self.rgb.l1(self.rgb.stem(x)), s1)
+            r2 = self.gate2(self.rgb.l2(r1), s2)
+            r3 = self.rgb.l3(self.early_proj(torch.cat([r2, s2], dim=1)))
+            return self.head(r3)
+
+        # early_fuse_late_gate
+        r1, r2 = self.rgb.forward_until_l2(x)
+        r3_raw = self.rgb.l3(self.early_proj(torch.cat([r2, s2], dim=1)))
+        return self.head(self.gate3(r3_raw, s3))
+
+
+# ─────────────────────────────────────────────────────────────
 #  PUBLIC API
 # ─────────────────────────────────────────────────────────────
 
@@ -3150,6 +3286,14 @@ MODEL_NAMES = [
     "shape_convnext_base",        # ImageNet only
     "shape_effnet_b0",            # ImageNet only
     "shape_effnet_b4",            # ImageNet only
+    # ── ShapeBiasNet ablations (ResNet-18 / CIFAR only) ───────
+    "shape_res18_early_gate",         # early gate + late fusion
+    "shape_res18_late_gate",          # late gate  + late fusion
+    "shape_res18_gate_only",          # late gate  + no fusion
+    "shape_res18_early_gate_nofuse",  # early gate + no fusion
+    "shape_res18_early_fuse",         # no gate    + early fusion
+    "shape_res18_early_fuse_early_gate", # early gate + early fusion
+    "shape_res18_early_fuse_late_gate",  # late gate  + early fusion
 ]
 
 
@@ -3333,5 +3477,15 @@ def build_model(name: str,
     if name == "shape_convnext_base": return ShapeBiasNet("convnext_base", **kw)
     if name == "shape_effnet_b0":     return ShapeBiasNet("effnet_b0",     **kw)
     if name == "shape_effnet_b4":     return ShapeBiasNet("effnet_b4",     **kw)
+
+    # ── ShapeBiasNet ablations ────────────────────────────────
+    _abl = ShapeBiasNetAblation
+    if name == "shape_res18_early_gate":            return _abl(variant="early_gate",            **kw)
+    if name == "shape_res18_late_gate":             return _abl(variant="late_gate",             **kw)
+    if name == "shape_res18_gate_only":             return _abl(variant="gate_only",             **kw)
+    if name == "shape_res18_early_gate_nofuse":     return _abl(variant="early_gate_nofuse",     **kw)
+    if name == "shape_res18_early_fuse":            return _abl(variant="early_fuse",            **kw)
+    if name == "shape_res18_early_fuse_early_gate": return _abl(variant="early_fuse_early_gate", **kw)
+    if name == "shape_res18_early_fuse_late_gate":  return _abl(variant="early_fuse_late_gate",  **kw)
 
     raise ValueError(f"Unknown model '{name}'. Choose from: {MODEL_NAMES}")

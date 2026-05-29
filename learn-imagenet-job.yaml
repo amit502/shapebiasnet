@@ -1,0 +1,139 @@
+# learn-imagenet-job.yaml
+# ─────────────────────────────────────────────────────────────
+# shape_res50 with learnable ShapeDiffusion — ImageNet-100
+#
+# Models : shape_res50
+# Dataset: imagenet100
+# Seed   : 42
+# Epochs : 50
+# Total  : 1 run (~2-3 hours)
+#
+# Checkpoints : /pvc/checkpoints/learn-diffusion-imgnet/seed-42/
+# Results     : /pvc/results/learn-diffusion-imgnet/seed-42/
+#
+# Submit:  kubectl apply -f learn-imagenet-job.yaml
+# Logs:    kubectl logs -f job/shape-res50-learn-imgnet -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-res50-learn-imgnet -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-res50-learn-imgnet
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-RTX-5000-Ada-Generation
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "=========================================="
+              echo "  Cloning repo (branch: shape-res-learn)"
+              echo "=========================================="
+              apt-get update -qq && apt-get install -y -qq git
+              git clone \
+                --branch shape-res-learn \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              pip install -r requirements.txt --quiet
+              nvidia-smi
+
+              SEED=42
+              CKPT_DIR="/pvc/checkpoints/learn-diffusion-imgnet/seed-${SEED}"
+              RESULTS_DIR="/pvc/results/learn-diffusion-imgnet/seed-${SEED}"
+              mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
+
+              rm -f "$CKPT_DIR/shape_res50_imagenet100.pt"
+
+              echo ""
+              echo "============================================================"
+              echo "  MODEL=shape_res50  DATASET=imagenet100  SEED=$SEED"
+              echo "============================================================"
+
+              python -u train.py \
+                --model    shape_res50 \
+                --dataset  imagenet100 \
+                --data_dir /pvc/imagenet100 \
+                --ckpt_dir $CKPT_DIR \
+                --epochs   50 \
+                --batch    64 \
+                --workers  8 \
+                --seed     $SEED
+
+              python -u eval.py \
+                --model       shape_res50 \
+                --dataset     imagenet100 \
+                --data_dir    /pvc/imagenet100 \
+                --ckpt_dir    $CKPT_DIR \
+                --results_dir $RESULTS_DIR \
+                --batch       64 \
+                --workers     8 \
+                || echo "  [WARN] Eval failed — ImageNet-100-C may not be ready."
+
+              echo ""
+              echo "============================================================"
+              echo "  Done."
+              echo "============================================================"
+              ls "$RESULTS_DIR"/
+
+          resources:
+            requests:
+              cpu: "3"
+              memory: "10Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "3"
+              memory: "12Gi"
+              nvidia.com/gpu: "1"
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

@@ -750,7 +750,9 @@ def run(model_name: str, ckpt_path: str) -> dict:
     # ── load model ──
     model = build_model(model_name, NUM_CLASSES, dataset=MODEL_DATASET)
     state = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(state["model"] if "model" in state else state)
+    sd = state["model"] if "model" in state else state
+    sd = {k: v for k, v in sd.items() if not k.startswith("aux_head.")}
+    model.load_state_dict(sd)
     model = model.to(DEVICE)
 
     # DataParallel disabled — causes NCCL hang on Nautilus

@@ -2979,36 +2979,35 @@ class ShapeBiasNet(nn.Module):
 class ShapeBiasNetFuse(nn.Module):
     """
     Shape stream injected at a specific RGB backbone stage.
-    No gating, no alpha — pure concat projection at the chosen depth.
+    No gating, no alpha — pure concat + Conv1×1 projection at chosen depth.
 
-    depth="l1" : concat(r1, s1) → proj → l2 → l3 → GAP → Linear
-    depth="l2" : concat(r2, s2) → proj → l3 → GAP → Linear
+    All three variants use the same simple head (GAP → Linear) for
+    a fair apples-to-apples comparison of injection depth only.
 
-    ResNet-18 / CIFAR only. Injection channels match by construction:
-        r1: 64ch, 32×32  ↔  s1: 64ch, 32×32
-        r2: 128ch, 16×16 ↔  s2: 128ch, 16×16
+    depth="l1" : concat(r1,s1) → proj(128→64)  → l2 → l3 → GAP → Linear
+    depth="l2" : concat(r2,s2) → proj(256→128) → l3       → GAP → Linear
+    depth="l3" : concat(r3,s3) → proj(512→256)            → GAP → Linear
+
+    ResNet-18 / CIFAR only. Channels match by construction:
+        r1: 64ch,  32×32  ↔  s1: 64ch,  32×32
+        r2: 128ch, 16×16  ↔  s2: 128ch, 16×16
+        r3: 256ch, 8×8    ↔  s3: 256ch, 8×8
     """
     def __init__(self, depth: str, num_classes: int, dataset: str):
         super().__init__()
-        assert depth in ("l1", "l2"), "depth must be 'l1' or 'l2'"
+        assert depth in ("l1", "l2", "l3"), "depth must be 'l1', 'l2', or 'l3'"
         assert "cifar" in dataset, "ShapeBiasNetFuse is CIFAR-only"
         self.depth = depth
 
         self.rgb   = RGBResNet(depth="18", dataset=dataset)
         self.shape = ShapeEncoder(out_ch=256, n_blocks=(2, 2, 1))
 
-        r_ch = self.rgb.out_ch  # [64, 128, 256]
-
-        if depth == "l1":
-            self.proj = nn.Sequential(
-                nn.Conv2d(r_ch[0] * 2, r_ch[0], kernel_size=1, bias=False),
-                nn.BatchNorm2d(r_ch[0]), nn.ReLU(),
-            )
-        else:  # l2
-            self.proj = nn.Sequential(
-                nn.Conv2d(r_ch[1] * 2, r_ch[1], kernel_size=1, bias=False),
-                nn.BatchNorm2d(r_ch[1]), nn.ReLU(),
-            )
+        r_ch = self.rgb.out_ch             # [64, 128, 256]
+        inject_ch = {"l1": r_ch[0], "l2": r_ch[1], "l3": r_ch[2]}[depth]
+        self.proj = nn.Sequential(
+            nn.Conv2d(inject_ch * 2, inject_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(inject_ch), nn.ReLU(),
+        )
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -3018,15 +3017,20 @@ class ShapeBiasNetFuse(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         target_h = x.shape[2]          # 32 for CIFAR
-        s1, s2, _ = self.shape(x, target_h=target_h)
+        s1, s2, s3 = self.shape(x, target_h=target_h)
 
         if self.depth == "l1":
             r1_raw = self.rgb.l1(self.rgb.stem(x))
             r1 = self.proj(torch.cat([r1_raw, s1], dim=1))
             r3 = self.rgb.l3(self.rgb.l2(r1))
-        else:  # l2
+
+        elif self.depth == "l2":
             r1, r2_raw = self.rgb.forward_until_l2(x)
             r3 = self.rgb.l3(self.proj(torch.cat([r2_raw, s2], dim=1)))
+
+        else:  # l3
+            _, _, r3_raw = self.rgb(x)
+            r3 = self.proj(torch.cat([r3_raw, s3], dim=1))
 
         return self.head(r3)
 
@@ -3213,6 +3217,7 @@ MODEL_NAMES = [
     # ── Fusion depth ablation (ResNet-18 / CIFAR only) ────────
     "shape_res18_fuse_l1",        # inject at l1 (32×32), passes through l2+l3
     "shape_res18_fuse_l2",        # inject at l2 (16×16), passes through l3
+    "shape_res18_fuse_l3",        # inject at l3 (8×8),   simple head (vs shape_res18)
 ]
 
 
@@ -3400,5 +3405,6 @@ def build_model(name: str,
     # ── Fusion depth ablation ─────────────────────────────────
     if name == "shape_res18_fuse_l1": return ShapeBiasNetFuse("l1", **kw)
     if name == "shape_res18_fuse_l2": return ShapeBiasNetFuse("l2", **kw)
+    if name == "shape_res18_fuse_l3": return ShapeBiasNetFuse("l3", **kw)
 
     raise ValueError(f"Unknown model '{name}'. Choose from: {MODEL_NAMES}")

@@ -2972,6 +2972,66 @@ class ShapeBiasNet(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
+#  FUSION DEPTH ABLATION  (ResNet-18 / CIFAR only)
+#  No gating. Pure additive injection: concat + Conv1×1 + BN + ReLU.
+# ─────────────────────────────────────────────────────────────
+
+class ShapeBiasNetFuse(nn.Module):
+    """
+    Shape stream injected at a specific RGB backbone stage.
+    No gating, no alpha — pure concat projection at the chosen depth.
+
+    depth="l1" : concat(r1, s1) → proj → l2 → l3 → GAP → Linear
+    depth="l2" : concat(r2, s2) → proj → l3 → GAP → Linear
+
+    ResNet-18 / CIFAR only. Injection channels match by construction:
+        r1: 64ch, 32×32  ↔  s1: 64ch, 32×32
+        r2: 128ch, 16×16 ↔  s2: 128ch, 16×16
+    """
+    def __init__(self, depth: str, num_classes: int, dataset: str):
+        super().__init__()
+        assert depth in ("l1", "l2"), "depth must be 'l1' or 'l2'"
+        assert "cifar" in dataset, "ShapeBiasNetFuse is CIFAR-only"
+        self.depth = depth
+
+        self.rgb   = RGBResNet(depth="18", dataset=dataset)
+        self.shape = ShapeEncoder(out_ch=256, n_blocks=(2, 2, 1))
+
+        r_ch = self.rgb.out_ch  # [64, 128, 256]
+
+        if depth == "l1":
+            self.proj = nn.Sequential(
+                nn.Conv2d(r_ch[0] * 2, r_ch[0], kernel_size=1, bias=False),
+                nn.BatchNorm2d(r_ch[0]), nn.ReLU(),
+            )
+        else:  # l2
+            self.proj = nn.Sequential(
+                nn.Conv2d(r_ch[1] * 2, r_ch[1], kernel_size=1, bias=False),
+                nn.BatchNorm2d(r_ch[1]), nn.ReLU(),
+            )
+
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(r_ch[2], num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        target_h = x.shape[2]          # 32 for CIFAR
+        s1, s2, _ = self.shape(x, target_h=target_h)
+
+        if self.depth == "l1":
+            r1_raw = self.rgb.l1(self.rgb.stem(x))
+            r1 = self.proj(torch.cat([r1_raw, s1], dim=1))
+            r3 = self.rgb.l3(self.rgb.l2(r1))
+        else:  # l2
+            r1, r2_raw = self.rgb.forward_until_l2(x)
+            r3 = self.rgb.l3(self.proj(torch.cat([r2_raw, s2], dim=1)))
+
+        return self.head(r3)
+
+
+# ─────────────────────────────────────────────────────────────
 #  PUBLIC API
 # ─────────────────────────────────────────────────────────────
 
@@ -3150,6 +3210,9 @@ MODEL_NAMES = [
     "shape_convnext_base",        # ImageNet only
     "shape_effnet_b0",            # ImageNet only
     "shape_effnet_b4",            # ImageNet only
+    # ── Fusion depth ablation (ResNet-18 / CIFAR only) ────────
+    "shape_res18_fuse_l1",        # inject at l1 (32×32), passes through l2+l3
+    "shape_res18_fuse_l2",        # inject at l2 (16×16), passes through l3
 ]
 
 
@@ -3333,5 +3396,9 @@ def build_model(name: str,
     if name == "shape_convnext_base": return ShapeBiasNet("convnext_base", **kw)
     if name == "shape_effnet_b0":     return ShapeBiasNet("effnet_b0",     **kw)
     if name == "shape_effnet_b4":     return ShapeBiasNet("effnet_b4",     **kw)
+
+    # ── Fusion depth ablation ─────────────────────────────────
+    if name == "shape_res18_fuse_l1": return ShapeBiasNetFuse("l1", **kw)
+    if name == "shape_res18_fuse_l2": return ShapeBiasNetFuse("l2", **kw)
 
     raise ValueError(f"Unknown model '{name}'. Choose from: {MODEL_NAMES}")

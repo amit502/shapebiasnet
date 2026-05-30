@@ -1,0 +1,174 @@
+# fuse-sweep-job.yaml
+# ─────────────────────────────────────────────────────────────
+# Fusion depth ablation — ResNet-18 / CIFAR-10
+#
+# Compares shape injection at different backbone stages.
+# No gating. Pure concat + Conv1×1 projection at each depth.
+#
+# Models:
+#   shape_res18_fuse_l1  — inject at l1 (32×32), through l2+l3
+#   shape_res18_fuse_l2  — inject at l2 (16×16), through l3
+#
+# NOTE: baseline_res18 and shape_res18 (late/l3 fusion) already
+#       have 3-seed results and are NOT re-run here.
+#
+# Dataset : cifar10
+# Seeds   : 42 / 23 / 17
+# Total   : 2 models x 1 dataset x 3 seeds = 6 runs (~2 hours)
+#
+# Checkpoints : /pvc/checkpoints/fuse-ablation/seed-{SEED}/
+# Results     : /pvc/results/fuse-ablation/seed-{SEED}/
+#
+# Submit:  kubectl apply -f fuse-sweep-job.yaml
+# Logs:    kubectl logs -f job/shape-res18-fuse-sweep -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-res18-fuse-sweep -n kc-ai-research-lab
+# ─────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shape-res18-fuse-sweep
+  namespace: kc-ai-research-lab
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-RTX-5000-Ada-Generation
+
+      containers:
+        - name: pipeline
+          image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "=========================================="
+              echo "  Cloning repo (branch: shape-res-fuse)"
+              echo "=========================================="
+              apt-get update -qq && apt-get install -y -qq git
+              git clone \
+                --branch shape-res-fuse \
+                --single-branch \
+                https://${GITHUB_PAT}@github.com/amit502/shapebiasnet.git \
+                /shapebiasnet
+              cd /shapebiasnet
+
+              pip install -r requirements.txt --quiet
+              nvidia-smi
+
+              set +e
+
+              MODELS="shape_res18_fuse_l1 shape_res18_fuse_l2"
+              SEEDS="42 23 17"
+              DATASET=cifar10
+              DATA_DIR="/pvc/${DATASET}"
+              PASS=0
+              FAIL=0
+
+              for SEED in $SEEDS; do
+                CKPT_DIR="/pvc/checkpoints/fuse-ablation/seed-${SEED}"
+                RESULTS_DIR="/pvc/results/fuse-ablation/seed-${SEED}"
+                mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
+
+                for MODEL in $MODELS; do
+                  echo ""
+                  echo "============================================================"
+                  echo "  MODEL=$MODEL  DATASET=$DATASET  SEED=$SEED"
+                  echo "============================================================"
+
+                  rm -f "$CKPT_DIR/${MODEL}_${DATASET}.pt"
+
+                  python -u train.py \
+                    --model    $MODEL \
+                    --dataset  $DATASET \
+                    --data_dir $DATA_DIR \
+                    --ckpt_dir $CKPT_DIR \
+                    --epochs   40 \
+                    --batch    128 \
+                    --workers  4 \
+                    --seed     $SEED
+                  TRAIN_STATUS=$?
+
+                  if [ $TRAIN_STATUS -ne 0 ]; then
+                    echo "  [ERROR] Training failed for $MODEL seed=$SEED — skipping eval."
+                    FAIL=$((FAIL + 1))
+                    continue
+                  fi
+
+                  python -u eval.py \
+                    --model       $MODEL \
+                    --dataset     $DATASET \
+                    --data_dir    $DATA_DIR \
+                    --ckpt_dir    $CKPT_DIR \
+                    --results_dir $RESULTS_DIR \
+                    --batch       128 \
+                    --workers     4
+                  EVAL_STATUS=$?
+
+                  if [ $EVAL_STATUS -ne 0 ]; then
+                    echo "  [WARN] Eval failed for $MODEL seed=$SEED"
+                    FAIL=$((FAIL + 1))
+                  else
+                    PASS=$((PASS + 1))
+                    echo "  [OK] $MODEL seed=$SEED done."
+                  fi
+                done
+              done
+
+              echo ""
+              echo "============================================================"
+              echo "  Sweep complete.  Passed: $PASS   Failed: $FAIL"
+              echo "============================================================"
+              ls /pvc/results/fuse-ablation/
+
+          resources:
+            requests:
+              cpu: "3"
+              memory: "9Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "3"
+              memory: "10Gi"
+              nvidia.com/gpu: "1"
+
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: github-pat
+                  key: token
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /pvc
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shape-resnet-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

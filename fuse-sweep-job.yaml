@@ -8,17 +8,14 @@
 # Models:
 #   shape_res18_fuse_l1  — inject at l1 (32×32), through l2+l3
 #   shape_res18_fuse_l2  — inject at l2 (16×16), through l3
-#   shape_res18_fuse_l3  — inject at l3 (8×8),   simple GAP head
 #
-# All three use identical architecture (concat+Conv1×1+GAP+Linear),
-# only injection depth varies — fair apples-to-apples comparison.
-#
-# NOTE: baseline_res18 and shape_res18 (weighted fusion head) already
-#       have 3-seed results and are NOT re-run here.
+# Already have 3-seed results (not re-run here):
+#   baseline_res18  — /pvc/results/res18-fix/
+#   shape_res18     — /pvc/results/res18-fix/  (= l3 late fusion reference)
 #
 # Dataset : cifar10
 # Seeds   : 42 / 23 / 17
-# Total   : 3 models x 1 dataset x 3 seeds = 9 runs (~3 hours)
+# Total   : 2 models x 1 dataset x 3 seeds = 6 runs (~2 hours)
 #
 # Checkpoints : /pvc/checkpoints/fuse-ablation/seed-{SEED}/
 # Results     : /pvc/results/fuse-ablation/seed-{SEED}/
@@ -73,7 +70,7 @@ spec:
 
               set +e
 
-              MODELS="shape_res18_fuse_l1 shape_res18_fuse_l2 shape_res18_fuse_l3"
+              MODELS="shape_res18_fuse_l1 shape_res18_fuse_l2"
               SEEDS="42 23 17"
               DATASET=cifar10
               DATA_DIR="/pvc/${DATASET}"

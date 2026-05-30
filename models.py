@@ -2996,7 +2996,6 @@ class ShapeBiasNetFuse(nn.Module):
     def __init__(self, depth: str, num_classes: int, dataset: str):
         super().__init__()
         assert depth in ("l1", "l2", "l3"), "depth must be 'l1', 'l2', or 'l3'"
-        assert "cifar" in dataset, "ShapeBiasNetFuse is CIFAR-only"
         self.depth = depth
 
         self.rgb   = RGBResNet(depth="18", dataset=dataset)
@@ -3016,23 +3015,23 @@ class ShapeBiasNetFuse(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        target_h = x.shape[2]          # 32 for CIFAR
-        e = self.shape.edge(x, target_h)
-
         if self.depth == "l1":
-            s1 = self.shape.stage1(e)
             r1_raw = self.rgb.l1(self.rgb.stem(x))
+            e  = self.shape.edge(x, target_h=r1_raw.shape[2])
+            s1 = self.shape.stage1(e)
             r1 = self.proj(torch.cat([r1_raw, s1], dim=1))
             r3 = self.rgb.l3(self.rgb.l2(r1))
 
         elif self.depth == "l2":
-            s2 = self.shape.stage2(self.shape.stage1(e))
             r1, r2_raw = self.rgb.forward_until_l2(x)
+            e  = self.shape.edge(x, target_h=r2_raw.shape[2] * 2)
+            s2 = self.shape.stage2(self.shape.stage1(e))
             r3 = self.rgb.l3(self.proj(torch.cat([r2_raw, s2], dim=1)))
 
         else:  # l3
-            s3 = self.shape.stage3(self.shape.stage2(self.shape.stage1(e)))
             _, _, r3_raw = self.rgb(x)
+            e  = self.shape.edge(x, target_h=r3_raw.shape[2] * 4)
+            s3 = self.shape.stage3(self.shape.stage2(self.shape.stage1(e)))
             r3 = self.proj(torch.cat([r3_raw, s3], dim=1))
 
         return self.head(r3)

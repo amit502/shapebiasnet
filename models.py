@@ -3017,18 +3017,21 @@ class ShapeBiasNetFuse(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         target_h = x.shape[2]          # 32 for CIFAR
-        s1, s2, s3 = self.shape(x, target_h=target_h)
+        e = self.shape.edge(x, target_h)
 
         if self.depth == "l1":
+            s1 = self.shape.stage1(e)
             r1_raw = self.rgb.l1(self.rgb.stem(x))
             r1 = self.proj(torch.cat([r1_raw, s1], dim=1))
             r3 = self.rgb.l3(self.rgb.l2(r1))
 
         elif self.depth == "l2":
+            s2 = self.shape.stage2(self.shape.stage1(e))
             r1, r2_raw = self.rgb.forward_until_l2(x)
             r3 = self.rgb.l3(self.proj(torch.cat([r2_raw, s2], dim=1)))
 
         else:  # l3
+            s3 = self.shape.stage3(self.shape.stage2(self.shape.stage1(e)))
             _, _, r3_raw = self.rgb(x)
             r3 = self.proj(torch.cat([r3_raw, s3], dim=1))
 

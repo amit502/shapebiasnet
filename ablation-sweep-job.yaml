@@ -67,7 +67,7 @@ spec:
 
               set +e
 
-              MODELS="baseline_res18 shape_res18 shape_res18_early_gate shape_res18_late_gate shape_res18_gate_only shape_res18_early_gate_nofuse"
+              MODELS="shape_res18_early_gate shape_res18_late_gate shape_res18_gate_only shape_res18_early_gate_nofuse"
               SEEDS="42 23 17"
               DATASET=cifar10
               DATA_DIR="/pvc/${DATASET}"

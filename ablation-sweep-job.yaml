@@ -1,23 +1,30 @@
-# cifar-sweep-job.yaml
+# ablation-sweep-job.yaml
 # ─────────────────────────────────────────────────────────────
-# Full CIFAR sweep: baseline + ShapeBiasNet on CIFAR-10 and CIFAR-100
+# Gating ablation sweep — ResNet-18 / CIFAR-10
 #
-# Models : baseline_res18 / baseline_res50 / shape_res18 / shape_res50
-# Dataset: cifar10, cifar100
+# Models:
+#   baseline_res18              — no shape stream
+#   shape_res18                 — main model (late fusion, no gating)
+#   shape_res18_early_gate      — gate r1,r2 + late fusion
+#   shape_res18_late_gate       — gate r3 + late fusion
+#   shape_res18_gate_only       — gate r3, no fusion
+#   shape_res18_early_gate_nofuse — gate r1,r2, no fusion
+#
+# Dataset: cifar10
 # Seeds  : 42 / 23 / 17
-# Total  : 4 models x 2 datasets x 3 seeds = 24 runs (~12 hours)
+# Total  : 6 models x 1 dataset x 3 seeds = 18 runs (~6 hours)
 #
-# Checkpoints : /pvc/checkpoints/cifar-sweep/seed-{SEED}/
-# Results     : /pvc/results/cifar-sweep/seed-{SEED}/
+# Checkpoints : /pvc/checkpoints/ablation-sweep/seed-{SEED}/
+# Results     : /pvc/results/ablation-sweep/seed-{SEED}/
 #
-# Submit:  kubectl apply -f cifar-sweep-job.yaml
-# Logs:    kubectl logs -f job/shape-cifar-sweep -n kc-ai-research-lab
-# Delete:  kubectl delete job shape-cifar-sweep -n kc-ai-research-lab
+# Submit:  kubectl apply -f ablation-sweep-job.yaml
+# Logs:    kubectl logs -f job/shape-ablation-sweep -n kc-ai-research-lab
+# Delete:  kubectl delete job shape-ablation-sweep -n kc-ai-research-lab
 # ─────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: shape-cifar-sweep
+  name: shape-ablation-sweep
   namespace: kc-ai-research-lab
 spec:
   backoffLimit: 0
@@ -60,61 +67,60 @@ spec:
 
               set +e
 
-              MODELS="baseline_res18 baseline_res50 shape_res18 shape_res50"
+              MODELS="baseline_res18 shape_res18 shape_res18_early_gate shape_res18_late_gate shape_res18_gate_only shape_res18_early_gate_nofuse"
               SEEDS="42 23 17"
+              DATASET=cifar10
+              DATA_DIR="/pvc/${DATASET}"
               PASS=0
               FAIL=0
 
               for SEED in $SEEDS; do
-                for DATASET in cifar10 cifar100; do
-                  DATA_DIR="/pvc/${DATASET}"
-                  CKPT_DIR="/pvc/checkpoints/cifar-sweep/seed-${SEED}"
-                  RESULTS_DIR="/pvc/results/cifar-sweep/seed-${SEED}"
-                  mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
+                CKPT_DIR="/pvc/checkpoints/ablation-sweep/seed-${SEED}"
+                RESULTS_DIR="/pvc/results/ablation-sweep/seed-${SEED}"
+                mkdir -p "$CKPT_DIR" "$RESULTS_DIR"
 
-                  for MODEL in $MODELS; do
-                    echo ""
-                    echo "============================================================"
-                    echo "  MODEL=$MODEL  DATASET=$DATASET  SEED=$SEED"
-                    echo "============================================================"
+                for MODEL in $MODELS; do
+                  echo ""
+                  echo "============================================================"
+                  echo "  MODEL=$MODEL  DATASET=$DATASET  SEED=$SEED"
+                  echo "============================================================"
 
-                    rm -f "$CKPT_DIR/${MODEL}_${DATASET}.pt"
+                  rm -f "$CKPT_DIR/${MODEL}_${DATASET}.pt"
 
-                    python -u train.py \
-                      --model    $MODEL \
-                      --dataset  $DATASET \
-                      --data_dir $DATA_DIR \
-                      --ckpt_dir $CKPT_DIR \
-                      --epochs   40 \
-                      --batch    128 \
-                      --workers  4 \
-                      --seed     $SEED
-                    TRAIN_STATUS=$?
+                  python -u train.py \
+                    --model    $MODEL \
+                    --dataset  $DATASET \
+                    --data_dir $DATA_DIR \
+                    --ckpt_dir $CKPT_DIR \
+                    --epochs   40 \
+                    --batch    128 \
+                    --workers  4 \
+                    --seed     $SEED
+                  TRAIN_STATUS=$?
 
-                    if [ $TRAIN_STATUS -ne 0 ]; then
-                      echo "  [ERROR] Training failed — skipping eval."
-                      FAIL=$((FAIL + 1))
-                      continue
-                    fi
+                  if [ $TRAIN_STATUS -ne 0 ]; then
+                    echo "  [ERROR] Training failed — skipping eval."
+                    FAIL=$((FAIL + 1))
+                    continue
+                  fi
 
-                    python -u eval.py \
-                      --model       $MODEL \
-                      --dataset     $DATASET \
-                      --data_dir    $DATA_DIR \
-                      --ckpt_dir    $CKPT_DIR \
-                      --results_dir $RESULTS_DIR \
-                      --batch       128 \
-                      --workers     4
-                    EVAL_STATUS=$?
+                  python -u eval.py \
+                    --model       $MODEL \
+                    --dataset     $DATASET \
+                    --data_dir    $DATA_DIR \
+                    --ckpt_dir    $CKPT_DIR \
+                    --results_dir $RESULTS_DIR \
+                    --batch       128 \
+                    --workers     4
+                  EVAL_STATUS=$?
 
-                    if [ $EVAL_STATUS -ne 0 ]; then
-                      echo "  [WARN] Eval failed for $MODEL $DATASET seed=$SEED"
-                      FAIL=$((FAIL + 1))
-                    else
-                      PASS=$((PASS + 1))
-                      echo "  [OK] $MODEL $DATASET seed=$SEED done."
-                    fi
-                  done
+                  if [ $EVAL_STATUS -ne 0 ]; then
+                    echo "  [WARN] Eval failed for $MODEL seed=$SEED"
+                    FAIL=$((FAIL + 1))
+                  else
+                    PASS=$((PASS + 1))
+                    echo "  [OK] $MODEL seed=$SEED done."
+                  fi
                 done
               done
 
@@ -122,7 +128,7 @@ spec:
               echo "============================================================"
               echo "  Sweep complete.  Passed: $PASS   Failed: $FAIL"
               echo "============================================================"
-              ls /pvc/results/cifar-sweep/
+              ls /pvc/results/ablation-sweep/
 
           resources:
             requests:

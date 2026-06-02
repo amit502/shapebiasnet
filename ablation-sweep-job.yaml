@@ -1,18 +1,19 @@
 # ablation-sweep-job.yaml
 # ─────────────────────────────────────────────────────────────
-# Gating ablation sweep — ResNet-18 / CIFAR-10
+# Ablation sweep — ResNet-18 / CIFAR-10
 #
-# Models:
-#   baseline_res18              — no shape stream
-#   shape_res18                 — main model (late fusion, no gating)
-#   shape_res18_early_gate      — gate r1,r2 + late fusion
-#   shape_res18_late_gate       — gate r3 + late fusion
-#   shape_res18_gate_only       — gate r3, no fusion
-#   shape_res18_early_gate_nofuse — gate r1,r2, no fusion
+# Models (7 ablation variants — baseline and shape_res18 not re-run):
+#   shape_res18_early_gate           — gate r1,r2 + late fusion
+#   shape_res18_late_gate            — gate r3 + late fusion
+#   shape_res18_gate_only            — gate r3, no fusion
+#   shape_res18_early_gate_nofuse    — gate r1,r2, no fusion
+#   shape_res18_early_fuse           — inject s2 at r2, no gate
+#   shape_res18_early_fuse_early_gate— gate r1,r2 + inject s2 at r2
+#   shape_res18_early_fuse_late_gate — inject s2 at r2 + gate r3
 #
 # Dataset: cifar10
 # Seeds  : 42 / 23 / 17
-# Total  : 6 models x 1 dataset x 3 seeds = 18 runs (~6 hours)
+# Total  : 7 models x 1 dataset x 3 seeds = 21 runs (~7 hours)
 #
 # Checkpoints : /pvc/checkpoints/ablation-sweep/seed-{SEED}/
 # Results     : /pvc/results/ablation-sweep/seed-{SEED}/
@@ -67,7 +68,7 @@ spec:
 
               set +e
 
-              MODELS="shape_res18_early_gate shape_res18_late_gate shape_res18_gate_only shape_res18_early_gate_nofuse"
+              MODELS="shape_res18_early_gate shape_res18_late_gate shape_res18_gate_only shape_res18_early_gate_nofuse shape_res18_early_fuse shape_res18_early_fuse_early_gate shape_res18_early_fuse_late_gate"
               SEEDS="42 23 17"
               DATASET=cifar10
               DATA_DIR="/pvc/${DATASET}"
